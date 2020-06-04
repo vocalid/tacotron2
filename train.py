@@ -2,6 +2,7 @@ import os
 import time
 import argparse
 import math
+import numpy as np
 from numpy import finfo
 
 import torch
@@ -10,11 +11,13 @@ import torch.distributed as dist
 from torch.utils.data.distributed import DistributedSampler
 from torch.utils.data import DataLoader
 
+import gradient_adaptive_factor
 from model import Tacotron2
 from data_utils import TextMelLoader, TextMelCollate
 from loss_function import Tacotron2Loss
 from logger import Tacotron2Logger
 from hparams import create_hparams
+from utils import to_gpu
 
 
 def reduce_tensor(tensor, n_gpus):
@@ -146,6 +149,26 @@ def validate(model, criterion, valset, iteration, batch_size, n_gpus,
         logger.log_validation(val_loss, model, y, y_pred, iteration)
 
 
+def calculate_global_mean(data_loader, global_mean_npy):
+    if global_mean_npy and os.path.exists(global_mean_npy):
+        global_mean = np.load(global_mean_npy)
+        return to_gpu(torch.tensor(global_mean))
+    sums = []
+    frames = []
+    print('calculating global mean...')
+    for i, batch in enumerate(data_loader):
+        (text_padded, input_lengths, mel_padded, gate_padded,
+         output_lengths, ctc_text, ctc_text_lengths) = batch
+        # padded values are 0.
+        sums.append(mel_padded.double().sum(dim=(0, 2)))
+        frames.append(output_lengths.double().sum())
+    global_mean = sum(sums) / sum(frames)
+    global_mean = to_gpu(global_mean.float())
+    if global_mean_npy:
+        np.save(global_mean_npy, global_mean.cpu().numpy())
+    return global_mean
+
+
 def train(output_directory, log_directory, checkpoint_path, warm_start, n_gpus,
           rank, group_name, hparams):
     """Training and validation logging results to tensorboard and stdout
@@ -165,6 +188,11 @@ def train(output_directory, log_directory, checkpoint_path, warm_start, n_gpus,
     torch.manual_seed(hparams.seed)
     torch.cuda.manual_seed(hparams.seed)
 
+    train_loader, valset, collate_fn = prepare_dataloaders(hparams)
+    if hparams.drop_frame_rate > 0.:
+        global_mean = calculate_global_mean(train_loader, hparams.global_mean_npy)
+        hparams.global_mean = global_mean
+
     model = load_model(hparams)
     learning_rate = hparams.learning_rate
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate,
@@ -183,7 +211,6 @@ def train(output_directory, log_directory, checkpoint_path, warm_start, n_gpus,
     logger = prepare_directories_and_logger(
         output_directory, log_directory, rank)
 
-    train_loader, valset, collate_fn = prepare_dataloaders(hparams)
 
     # Load checkpoint if one exists
     iteration = 0
@@ -215,10 +242,33 @@ def train(output_directory, log_directory, checkpoint_path, warm_start, n_gpus,
             y_pred = model(x)
 
             loss = criterion(y_pred, y)
+            if model.mi is not None:
+                # transpose to [b, T, dim]
+                decoder_outputs = y_pred[0].transpose(2, 1)
+                ctc_text, ctc_text_lengths, aco_lengths = x[-2], x[-1], x[4]
+                taco_loss = loss
+                mi_loss = model.mi(decoder_outputs, ctc_text, aco_lengths, ctc_text_lengths)
+                if hparams.use_gaf:
+                    if i % gradient_adaptive_factor.UPDATE_GAF_EVERY_N_STEP == 0:
+                        safe_loss = 0. * sum([x.sum() for x in model.parameters()])
+                        gaf = gradient_adaptive_factor.calc_grad_adapt_factor(
+                            taco_loss + safe_loss, mi_loss + safe_loss, model.parameters(), optimizer)
+                        gaf = min(gaf, hparams.max_gaf)
+                else:
+                    gaf = 1.0
+                loss = loss + gaf * mi_loss
+            else:
+                taco_loss = loss
+                mi_loss = torch.tensor([-1.0])
+                gaf = -1.0
             if hparams.distributed_run:
                 reduced_loss = reduce_tensor(loss.data, n_gpus).item()
+                taco_loss = reduce_tensor(taco_loss.data, n_gpus).item()
+                mi_loss = reduce_tensor(mi_loss.data, n_gpus).item()
             else:
                 reduced_loss = loss.item()
+                taco_loss = taco_loss.item()
+                mi_loss = mi_loss.item()
             if hparams.fp16_run:
                 with amp.scale_loss(loss, optimizer) as scaled_loss:
                     scaled_loss.backward()
@@ -237,10 +287,12 @@ def train(output_directory, log_directory, checkpoint_path, warm_start, n_gpus,
 
             if not is_overflow and rank == 0:
                 duration = time.perf_counter() - start
-                print("Train loss {} {:.6f} Grad Norm {:.6f} {:.2f}s/it".format(
-                    iteration, reduced_loss, grad_norm, duration))
+                print("Train loss {} {:.4f} mi_loss {:.4f} Grad Norm {:.4f} "
+                      "gaf {:.4f} {:.2f}s/it".format(
+                    iteration, taco_loss, mi_loss, grad_norm, gaf, duration))
                 logger.log_training(
-                    reduced_loss, grad_norm, learning_rate, duration, iteration)
+                    reduced_loss, taco_loss, mi_loss, grad_norm, gaf,
+                    learning_rate, duration, iteration)
 
             if not is_overflow and (iteration % hparams.iters_per_checkpoint == 0):
                 validate(model, criterion, valset, iteration,

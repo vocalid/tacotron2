@@ -80,12 +80,22 @@ def create_hparams(hparams_string=None, verbose=False):
         ################################
         # Optimization Hyperparameters #
         ################################
-        use_saved_learning_rate=False,
+        use_saved_learning_rate=True,
         learning_rate=1e-3,
         weight_decay=1e-6,
         grad_clip_thresh=1.0,
+        # batch_size=64,
         batch_size=32,
-        mask_padding=True  # set model's padded outputs to padded values
+        mask_padding=True,  # set model's padded outputs to padded values
+
+        ##################################
+        # MMI options                    #
+        ##################################
+        drop_frame_rate=0.2,
+        use_mmi=False,
+        use_gaf=False,
+        max_gaf=0.5,
+        global_mean_npy='ljspeech_global_mean.npy'
     )
 
     if hparams_string:
