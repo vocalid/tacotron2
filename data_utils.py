@@ -1,3 +1,4 @@
+import os
 import random
 import numpy as np
 import torch
@@ -6,6 +7,8 @@ import torch.utils.data
 import layers
 from utils import load_wav_to_torch, load_filepaths_and_text
 from text import text_to_sequence
+from textanalysis.textanalyzer import TextAnalyzer
+from tacorn.utterance import Utterance
 
 
 class TextMelLoader(torch.utils.data.Dataset):
@@ -24,13 +27,73 @@ class TextMelLoader(torch.utils.data.Dataset):
             hparams.filter_length, hparams.hop_length, hparams.win_length,
             hparams.n_mel_channels, hparams.sampling_rate, hparams.mel_fmin,
             hparams.mel_fmax)
+        #TODO: will go to preprocessing
+        self.textanalyzer = TextAnalyzer(use_phones=hparams.use_phonemes,
+                                         g2p_backend=hparams.g2p_backend, language=hparams.language)
+        self._phone_cache_dir = os.path.join(os.path.dirname(audiopaths_and_text), "_phone_cache")
+        self._hparams = hparams
+        self._phoneme_cache = {}
+        os.makedirs(self._phone_cache_dir, exist_ok=True)
+
         random.seed(hparams.seed)
         random.shuffle(self.audiopaths_and_text)
+
+    def _load_sequence(self, cache_dir, filename):
+        fn = filename.replace("audio-", "phones-").replace(".npy", "")
+        try:
+            print(f"Trying to load {cache_dir}/{fn}")
+            ph_seq = np.load(os.path.join(cache_dir, fn + ".npy"))
+            if len(ph_seq) > 0:
+                return ph_seq
+            else:
+                print("Failed")
+                return None
+        except:
+            print("Failed")
+            return None
+
+    def _save_sequence(self, cache_dir, filename, ph_seq):
+        fn = filename.replace("audio-", "phones-")
+        print(f"Storing into {cache_dir} {fn}")
+        np.save(os.path.join(cache_dir, fn), ph_seq)
+
+    def _save_utterance(self, cache_dir, filename, utt):
+        fn = filename.replace("audio-", "utt-").replace(".npy", ".txt")
+        with open(os.path.join(cache_dir, fn), 'wt') as fp:
+            fp.write(str(utt))
+
+    def _text_to_sequence(self, filename, text):
+        ''' Get a sequence of symbol IDs for a given text. '''
+        if self._hparams.use_phonemes:
+            # load from in-memory cache
+            if text in self._phoneme_cache:
+                return self._phoneme_cache[text]
+            else:
+                # load from file
+                ph_seq = self._load_sequence(self._phone_cache_dir, filename)
+                if ph_seq is not None:
+                    return ph_seq
+
+                # otherwise run TA
+                print(f"Analyzing: {text}")
+                utterance = Utterance(str(text))
+                self.textanalyzer.analyze(utterance)
+                ph_seq = np.asarray(utterance.symbol_sequence, dtype=np.int32)
+                # save utterance, sequence and store in in-memory cache
+                self._save_utterance(self._phone_cache_dir, filename, utterance)
+                self._save_sequence(self._phone_cache_dir, filename, ph_seq)
+                self._phoneme_cache[text] = ph_seq
+                return ph_seq
+        utterance = Utterance(text)
+        self.textanalyzer.analyze(utterance)
+        self._save_utterance(self._phone_cache_dir, filename, utterance)
+        return np.asarray(utterance.symbol_sequence, dtype=np.int32)
 
     def get_mel_text_pair(self, audiopath_and_text):
         # separate filename and text
         audiopath, text = audiopath_and_text[0], audiopath_and_text[1]
-        text = self.get_text(text)
+        filename = os.path.basename(audiopath)[:-4]
+        text = self.get_text(filename, text)
         mel = self.get_mel(audiopath)
         return (text, mel)
 
@@ -53,8 +116,9 @@ class TextMelLoader(torch.utils.data.Dataset):
 
         return melspec
 
-    def get_text(self, text):
-        text_norm = torch.IntTensor(text_to_sequence(text, self.text_cleaners))
+    def get_text(self, filename, text):
+        #text_norm = torch.IntTensor(text_to_sequence(text, self.text_cleaners))
+        text_norm = torch.IntTensor(self._text_to_sequence(filename, text))
         return text_norm
 
     def __getitem__(self, index):
