@@ -1,5 +1,5 @@
 import tensorflow as tf
-from text import symbols
+from textanalysis.symbols import get_symbols
 
 
 def create_hparams(hparams_string=None, verbose=False):
@@ -27,15 +27,10 @@ def create_hparams(hparams_string=None, verbose=False):
         use_phonemes=True,
         g2p_backend="phonemizer",  # can be "phonemizer" or "vocalid"
         language="en-us",
-        load_mel_from_disk=False,
-        training_files='filelists/ljs_audio_text_train_filelist.txt',
-        validation_files='filelists/ljs_audio_text_val_filelist.txt',
-        text_cleaners=['english_cleaners'],
 
         ################################
         # Audio Parameters             #
         ################################
-        max_wav_value=32768.0,
         sampling_rate=22050,
         filter_length=1024,
         hop_length=256,
@@ -44,10 +39,19 @@ def create_hparams(hparams_string=None, verbose=False):
         mel_fmin=0.0,
         mel_fmax=8000.0,
 
+       ################################
+        # Nvidia style preprocessing   #
+        ################################
+        load_mel_from_disk=False,
+        training_files='filelists/ljs_audio_text_train_filelist.txt',
+        validation_files='filelists/ljs_audio_text_val_filelist.txt',
+        text_cleaners=['english_cleaners'],
+        max_wav_value=32768.0,
+
         ################################
         # Model Parameters             #
         ################################
-        n_symbols=len(symbols),
+        n_symbols=None,
         symbols_embedding_dim=512,
 
         # Encoder parameters
@@ -105,4 +109,5 @@ def create_hparams(hparams_string=None, verbose=False):
     if verbose:
         tf.logging.info('Final parsed hparams: %s', hparams.values())
 
+    hparams.n_symbols = get_symbols(hparams.use_phonemes, hparams.g2p_backend)
     return hparams
