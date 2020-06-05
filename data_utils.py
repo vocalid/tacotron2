@@ -32,6 +32,7 @@ class TextMelLoader(torch.utils.data.Dataset):
                                          g2p_backend=hparams.g2p_backend, language=hparams.language)
         self._phone_cache_dir = os.path.join(os.path.dirname(audiopaths_and_text), "_phone_cache")
         self._hparams = hparams
+        print(f"Creating new in-memory phone cache for {audiopaths_and_text}")
         self._phoneme_cache = {}
         os.makedirs(self._phone_cache_dir, exist_ok=True)
 
@@ -41,15 +42,15 @@ class TextMelLoader(torch.utils.data.Dataset):
     def _load_sequence(self, cache_dir, filename):
         fn = filename.replace("audio-", "phones-").replace(".npy", "")
         try:
-            print(f"Trying to load {cache_dir}/{fn}")
+            print(f"Loading {cache_dir}/{fn}")
             ph_seq = np.load(os.path.join(cache_dir, fn + ".npy"))
             if len(ph_seq) > 0:
                 return ph_seq
             else:
-                print("Failed")
+                print("Loading failed, running text analysis")
                 return None
         except:
-            print("Failed")
+            print("Loading failed, running text analysis")
             return None
 
     def _save_sequence(self, cache_dir, filename, ph_seq):
@@ -66,22 +67,21 @@ class TextMelLoader(torch.utils.data.Dataset):
         ''' Get a sequence of symbol IDs for a given text. '''
         if self._hparams.use_phonemes:
             # load from in-memory cache
+            print(f"Searching for {text} in cache (currently {len(self._phoneme_cache)} entries")
             if text in self._phoneme_cache:
                 return self._phoneme_cache[text]
             else:
                 # load from file
                 ph_seq = self._load_sequence(self._phone_cache_dir, filename)
-                if ph_seq is not None:
-                    return ph_seq
-
-                # otherwise run TA
-                print(f"Analyzing: {text}")
-                utterance = Utterance(str(text))
-                self.textanalyzer.analyze(utterance)
-                ph_seq = np.asarray(utterance.symbol_sequence, dtype=np.int32)
-                # save utterance, sequence and store in in-memory cache
-                self._save_utterance(self._phone_cache_dir, filename, utterance)
-                self._save_sequence(self._phone_cache_dir, filename, ph_seq)
+                if ph_seq is None:
+                    # otherwise run TA
+                    print(f"Analyzing: {text}")
+                    utterance = Utterance(str(text))
+                    self.textanalyzer.analyze(utterance)
+                    ph_seq = np.asarray(utterance.symbol_sequence, dtype=np.int32)
+                    # save utterance, sequence and store in in-memory cache
+                    self._save_utterance(self._phone_cache_dir, filename, utterance)
+                    self._save_sequence(self._phone_cache_dir, filename, ph_seq)
                 self._phoneme_cache[text] = ph_seq
                 return ph_seq
         utterance = Utterance(text)
