@@ -36,10 +36,11 @@ def create_hparams(hparams_string=None, verbose=False):
         hop_length=256,
         win_length=1024,
         n_mel_channels=80,
-        mel_fmin=0.0,
+        mel_fmin=30.0,
         mel_fmax=8000.0,
+        preprocessing_type="vocalid",  # vocalid or nvidia (for compatibility with pretrained waveglow models)
 
-       ################################
+        ################################
         # Nvidia style preprocessing   #
         ################################
         load_mel_from_disk=False,
@@ -47,6 +48,32 @@ def create_hparams(hparams_string=None, verbose=False):
         validation_files='filelists/ljs_audio_text_val_filelist.txt',
         text_cleaners=['english_cleaners'],
         max_wav_value=32768.0,
+
+        ################################
+        # TF Taco style preprocessing  #
+        ################################
+        trim_silence=True,
+        drop_mels_length=True,
+        max_mel_frames=800,
+        min_level_db=-100,
+        ref_level_db=20,
+        preemphasis_factor=0.97,
+        power=1.5,  # Only used in G&L inversion, usually values between 1.2 and 1.5 are a good choice.
+        griffin_lim_iters=30,  # Number of G&L iterations, typically 30 is enough but we use 60 to ensure convergence.
+        signal_normalization=True,  # Whether to normalize mel spectrograms to some predefined range (following below parameters)
+        allow_clipping_in_normalization=True,  # Only relevant if mel_normalization = True
+        symmetric_mels=True, # Whether to scale the data to be symmetric around 0. (Also multiplies the output range by 2, faster and cleaner convergence)
+        max_abs_value=4.,
+        rescale_wav=True,  # Whether to rescale audio prior to preprocessing
+        rescale_max=0.999,  # Rescaling value
+
+        ################################
+        # Speaker embeddings           #
+        ################################
+        speaker_embeddings=False,            # use speaker embeddings in Tacotron
+        speaker_embedding_size=256,          # dimension of embedding vector
+        speaker_embedding_average=True,     # use embeddings averaged per speaker instead of per-sentence
+        speaker_id_separator='_',            # separator for speaker name prefix in filenames
 
         ################################
         # Model Parameters             #
@@ -109,5 +136,5 @@ def create_hparams(hparams_string=None, verbose=False):
     if verbose:
         tf.logging.info('Final parsed hparams: %s', hparams.values())
 
-    hparams.n_symbols = get_symbols(hparams.use_phonemes, hparams.g2p_backend)
+    hparams.n_symbols = len(get_symbols(hparams.use_phonemes, hparams.g2p_backend))
     return hparams
