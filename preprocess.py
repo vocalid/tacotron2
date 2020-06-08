@@ -1,4 +1,5 @@
 import os
+import random
 from concurrent.futures import ProcessPoolExecutor
 from functools import partial
 from pathlib import Path
@@ -66,18 +67,22 @@ def create_embeddings(metadata, synthesizer_root: Path, encoder_model_fpath: Pat
 
 
 def write_metadata(metadata, out_dir, hparams):
+    random.shuffle(metadata)
     with open(os.path.join(out_dir, 'train.txt'), 'w', encoding='utf-8') as f:
-        for m in metadata:
+        for m in metadata[hparams.valid_samples:]:
             f.write('|'.join([str(x) for x in m]) + '\n')
-    mel_frames = sum([int(m[4]) for m in metadata])
-    timesteps = sum([int(m[3]) for m in metadata])
+    with open(os.path.join(out_dir, 'valid.txt'), 'w', encoding='utf-8') as f:
+        for m in metadata[:hparams.valid_samples]:
+            f.write('|'.join([str(x) for x in m]) + '\n')
+    mel_frames = sum([int(m[3]) for m in metadata])
+    timesteps = sum([int(m[2]) for m in metadata])
     sr = hparams.sampling_rate
     hours = timesteps / sr / 3600
     print('Write {} utterances, {} mel frames, {} audio timesteps, ({:.2f} hours)'.format(
         len(metadata), mel_frames, timesteps, hours))
-    print('Max input length (text chars): {}'.format(max(len(m[5]) for m in metadata)))
-    print('Max mel frames length: {}'.format(max(int(m[4]) for m in metadata)))
-    print('Max audio timesteps length: {}'.format(max(m[3] for m in metadata)))
+    print('Max input length (text chars): {}'.format(max(len(m[4]) for m in metadata)))
+    print('Max mel frames length: {}'.format(max(int(m[3]) for m in metadata)))
+    print('Max audio timesteps length: {}'.format(max(m[2] for m in metadata)))
 
 
 def preprocess(experiment, hparams, wav_dir, metadata_file, n_jobs=4, tqdm=lambda x: x):
@@ -187,6 +192,7 @@ def _process_utterance(wav_path, text, mel_out_dir, wav_out_dir, index, hparams)
     mel_frames = mel_spectrogram.shape[1]
 
     if mel_frames > hparams.max_mel_frames and hparams.drop_mels_length:
+        print(f"Dropping {index} because mel_frames is {mel_frames}")
         return None
 
     # Compute the linear scale spectrogram from the wav

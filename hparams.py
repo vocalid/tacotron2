@@ -52,6 +52,7 @@ def create_hparams(hparams_string=None, verbose=False):
         ################################
         # TF Taco style preprocessing  #
         ################################
+        valid_samples=20,  # number of files to use for the validation set
         trim_silence=True,
         drop_mels_length=True,
         max_mel_frames=800,
@@ -136,5 +137,5 @@ def create_hparams(hparams_string=None, verbose=False):
     if verbose:
         tf.logging.info('Final parsed hparams: %s', hparams.values())
 
-    hparams.n_symbols = len(get_symbols(hparams.use_phonemes, hparams.g2p_backend))
+    hparams.n_symbols = len(get_symbols(hparams.use_phonemes, hparams.g2p_backend)[0])
     return hparams

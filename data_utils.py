@@ -17,12 +17,16 @@ class TextMelLoader(torch.utils.data.Dataset):
         2) normalizes text and converts them to sequences of one-hot vectors
         3) computes mel-spectrograms from audio files.
     """
-    def __init__(self, audiopaths_and_text, hparams):
-        self.audiopaths_and_text = load_filepaths_and_text(audiopaths_and_text)
+    def __init__(self, dataset, experiment, hparams):
+        self.audiopaths_and_text = load_filepaths_and_text(dataset, experiment, hparams)
         self.text_cleaners = hparams.text_cleaners
         self.max_wav_value = hparams.max_wav_value
         self.sampling_rate = hparams.sampling_rate
         self.load_mel_from_disk = hparams.load_mel_from_disk
+        self.hparams = hparams
+        if hparams.preprocessing_type == "vocalid":
+            # vocalid preprocessing is never on the fly
+            self.load_mel_from_disk = True
         self.stft = layers.TacotronSTFT(
             hparams.filter_length, hparams.hop_length, hparams.win_length,
             hparams.n_mel_channels, hparams.sampling_rate, hparams.mel_fmin,
@@ -30,14 +34,17 @@ class TextMelLoader(torch.utils.data.Dataset):
         #TODO: will go to preprocessing
         self.textanalyzer = TextAnalyzer(use_phones=hparams.use_phonemes,
                                          g2p_backend=hparams.g2p_backend, language=hparams.language)
-        self._phone_cache_dir = os.path.join(os.path.dirname(audiopaths_and_text), "_phone_cache")
+        self._phone_cache_dir = os.path.join(experiment.paths["acoustic_features"], "_phone_cache")
         self._hparams = hparams
-        print(f"Creating new in-memory phone cache for {audiopaths_and_text}")
+        print(f"Creating new in-memory phone cache")
         self._phoneme_cache = {}
         os.makedirs(self._phone_cache_dir, exist_ok=True)
-
+        # fill phoneme cache first time before multiprocessing clones this data
+        for paths in self.audiopaths_and_text:
+            self.get_mel_text_pair(paths, dummy_mel=True)
         random.seed(hparams.seed)
         random.shuffle(self.audiopaths_and_text)
+
 
     def _load_sequence(self, cache_dir, filename):
         fn = filename.replace("audio-", "phones-").replace(".npy", "")
@@ -67,7 +74,7 @@ class TextMelLoader(torch.utils.data.Dataset):
         ''' Get a sequence of symbol IDs for a given text. '''
         if self._hparams.use_phonemes:
             # load from in-memory cache
-            print(f"Searching for {text} in cache (currently {len(self._phoneme_cache)} entries")
+            #print(f"Searching for {text} in cache (currently {len(self._phoneme_cache)} entries")
             if text in self._phoneme_cache:
                 return self._phoneme_cache[text]
             else:
@@ -89,12 +96,14 @@ class TextMelLoader(torch.utils.data.Dataset):
         self._save_utterance(self._phone_cache_dir, filename, utterance)
         return np.asarray(utterance.symbol_sequence, dtype=np.int32)
 
-    def get_mel_text_pair(self, audiopath_and_text):
+    def get_mel_text_pair(self, audiopath_and_text, dummy_mel=False):
         # separate filename and text
         audiopath, text = audiopath_and_text[0], audiopath_and_text[1]
         filename = os.path.basename(audiopath)[:-4]
         text, ctc_text = self.get_text(filename, text)
-        mel = self.get_mel(audiopath)
+        mel = None
+        if not dummy_mel:
+            mel = self.get_mel(audiopath)
         return (text, ctc_text, mel)
 
     def get_mel(self, filename):
@@ -110,6 +119,8 @@ class TextMelLoader(torch.utils.data.Dataset):
             melspec = torch.squeeze(melspec, 0)
         else:
             melspec = torch.from_numpy(np.load(filename))
+            if self.hparams.preprocessing_type == "vocalid":
+                melspec = melspec.T
             assert melspec.size(0) == self.stft.n_mel_channels, (
                 'Mel dimension mismatch: given {}, expected {}'.format(
                     melspec.size(0), self.stft.n_mel_channels))

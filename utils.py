@@ -1,3 +1,4 @@
+import os
 import numpy as np
 from scipy.io.wavfile import read
 import torch
@@ -31,9 +32,29 @@ def load_wav_to_torch(full_path):
     return torch.FloatTensor(data.astype(np.float32)), sampling_rate
 
 
-def load_filepaths_and_text(filename, split="|"):
+def load_filepaths_and_text(dataset, experiment, hparams, split="|"):
+    preprocessing_style = hparams.preprocessing_type
+    filename = None
+    if preprocessing_style == "nvidia":
+        if dataset == "train":
+            filename = hparams.training_files
+        elif dataset == "valid":
+            filename = hparams.validation_files
+    elif preprocessing_style == "vocalid":
+        filename = os.path.join(experiment.paths["acoustic_features"], dataset + ".txt")
+    if filename is None:
+        raise ValueError(f"Invalid combination {preprocessing_style}/{dataset}")
+
     with open(filename, encoding='utf-8') as f:
-        filepaths_and_text = [line.strip().split(split) for line in f]
+        if preprocessing_style == "nvidia":
+            filepaths_and_text = [line.strip().split(split) for line in f]
+        elif preprocessing_style == "vocalid":
+            metadata = [line.strip().split(split) for line in f]
+            filepaths_and_text = [(
+                os.path.join(os.path.join(experiment.paths["acoustic_features"], "mel", m[1]))
+                            , m[4]) for m in metadata] 
+        else:
+            raise ValueError(f"Invalid preprocessing style {preprocessing_style}")
     return filepaths_and_text
 
 
