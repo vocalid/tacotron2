@@ -1,4 +1,5 @@
 from math import sqrt
+import numpy as np
 import torch
 from torch.autograd import Variable
 from torch import nn
@@ -6,6 +7,76 @@ from torch.nn import functional as F
 from layers import ConvNorm, LinearNorm
 from utils import to_gpu, get_mask_from_lengths, dropout_frame
 from text.symbols import ctc_symbols
+
+
+# https://github.com/as-ideas/ForwardTacotron/blob/master/models/forward_tacotron.py
+class LengthRegulator(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x, dur):
+        return self.expand(x, dur)
+
+    @staticmethod
+    def build_index(duration, x):
+        duration[duration < 0] = 0
+        tot_duration = duration.cumsum(1).detach().cpu().numpy().astype('int')
+        max_duration = int(tot_duration.max().item())
+        index = np.zeros([x.shape[0], max_duration, x.shape[2]], dtype='long')
+
+        for i in range(tot_duration.shape[0]):
+            pos = 0
+            for j in range(tot_duration.shape[1]):
+                pos1 = tot_duration[i, j]
+                index[i, pos:pos1, :] = j
+                pos = pos1
+            index[i, pos:, :] = j
+        return torch.LongTensor(index).to(duration.device)
+
+    def expand(self, x, dur):
+        idx = self.build_index(dur, x)
+        y = torch.gather(x, 1, idx)
+        return y
+
+
+class DurationPredictor(nn.Module):
+    def __init__(self, in_dims, conv_dims=256, rnn_dims=64, dropout=0.5):
+        super().__init__()
+        self.convs = torch.nn.ModuleList([
+            BatchNormConv(in_dims, conv_dims, 5, activation=torch.relu),
+            BatchNormConv(conv_dims, conv_dims, 5, activation=torch.relu),
+            BatchNormConv(conv_dims, conv_dims, 5, activation=torch.relu),
+        ])
+        self.rnn = nn.GRU(conv_dims, rnn_dims,
+                          batch_first=True, bidirectional=True)
+        self.lin = nn.Linear(2 * rnn_dims, 1)
+        self.dropout = dropout
+
+    def forward(self, x, alpha=1.0):
+        x = x.transpose(1, 2)
+        for conv in self.convs:
+            x = conv(x)
+            x = F.dropout(x, p=self.dropout, training=self.training)
+        x = x.transpose(1, 2)
+        x, _ = self.rnn(x)
+        x = self.lin(x)
+        return x / alpha
+
+
+class BatchNormConv(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel, activation=None):
+        super().__init__()
+        self.conv = nn.Conv1d(in_channels, out_channels,
+                              kernel, stride=1, padding=kernel // 2, bias=False)
+        self.bnorm = nn.BatchNorm1d(out_channels)
+        self.activation = activation
+
+    def forward(self, x):
+        x = self.conv(x)
+        if self.activation:
+            x = self.activation(x)
+        x = self.bnorm(x)
+        return x
 
 
 class LocationLayer(nn.Module):
@@ -56,7 +127,8 @@ class Attention(nn.Module):
         """
 
         processed_query = self.query_layer(query.unsqueeze(1))
-        processed_attention_weights = self.location_layer(attention_weights_cat)
+        processed_attention_weights = self.location_layer(
+            attention_weights_cat)
         energies = self.v(torch.tanh(
             processed_query + processed_attention_weights + processed_memory))
 
@@ -125,7 +197,8 @@ class Postnet(nn.Module):
                     ConvNorm(hparams.postnet_embedding_dim,
                              hparams.postnet_embedding_dim,
                              kernel_size=hparams.postnet_kernel_size, stride=1,
-                             padding=int((hparams.postnet_kernel_size - 1) / 2),
+                             padding=int(
+                                 (hparams.postnet_kernel_size - 1) / 2),
                              dilation=1, w_init_gain='tanh'),
                     nn.BatchNorm1d(hparams.postnet_embedding_dim))
             )
@@ -137,11 +210,12 @@ class Postnet(nn.Module):
                          padding=int((hparams.postnet_kernel_size - 1) / 2),
                          dilation=1, w_init_gain='linear'),
                 nn.BatchNorm1d(hparams.n_mel_channels))
-            )
+        )
 
     def forward(self, x):
         for i in range(len(self.convolutions) - 1):
-            x = F.dropout(torch.tanh(self.convolutions[i](x)), 0.5, self.training)
+            x = F.dropout(torch.tanh(
+                self.convolutions[i](x)), 0.5, self.training)
         x = F.dropout(self.convolutions[-1](x), 0.5, self.training)
 
         return x
@@ -152,6 +226,7 @@ class Encoder(nn.Module):
         - Three 1-d convolution banks
         - Bidirectional LSTM
     """
+
     def __init__(self, hparams):
         super(Encoder, self).__init__()
 
@@ -241,10 +316,12 @@ class Decoder(nn.Module):
         )
 
         self.mel_layer = nn.Sequential(
-            LinearNorm(hparams.decoder_rnn_dim, hparams.decoder_rnn_dim, bias=True, w_init_gain='relu'),
+            LinearNorm(hparams.decoder_rnn_dim,
+                       hparams.decoder_rnn_dim, bias=True, w_init_gain='relu'),
             nn.ReLU(),
             nn.Dropout(p=0.5),
-            LinearNorm(hparams.decoder_rnn_dim, hparams.n_mel_channels * hparams.n_frames_per_step)
+            LinearNorm(hparams.decoder_rnn_dim,
+                       hparams.n_mel_channels * hparams.n_frames_per_step)
         )
 
         self.gate_layer = LinearNorm(
@@ -345,7 +422,8 @@ class Decoder(nn.Module):
         # (B, T_out, n_mel_channels) -> (B, n_mel_channels, T_out)
         mel_outputs = mel_outputs.transpose(1, 2)
 
-        decoder_outputs = torch.stack(decoder_outputs).transpose(0, 1).contiguous()
+        decoder_outputs = torch.stack(
+            decoder_outputs).transpose(0, 1).contiguous()
         decoder_outputs = decoder_outputs.transpose(1, 2)
 
         return decoder_outputs, mel_outputs, gate_outputs, alignments
@@ -447,7 +525,8 @@ class Decoder(nn.Module):
         decoder_outputs, mel_outputs, gate_outputs, alignments = [], [], [], []
         while True:
             decoder_input = self.prenet(decoder_input)
-            decoder_output, mel_output, gate_output, alignment = self.decode(decoder_input)
+            decoder_output, mel_output, gate_output, alignment = self.decode(
+                decoder_input)
 
             decoder_outputs += [decoder_output.squeeze(1)]
             mel_outputs += [mel_output.squeeze(1)]
@@ -472,7 +551,8 @@ class MIEsitmator(nn.Module):
     def __init__(self, vocab_size, decoder_dim, hidden_size, dropout=0.5):
         super(MIEsitmator, self).__init__()
         self.proj = nn.Sequential(
-            LinearNorm(decoder_dim, hidden_size, bias=True, w_init_gain='relu'),
+            LinearNorm(decoder_dim, hidden_size,
+                       bias=True, w_init_gain='relu'),
             nn.ReLU(),
             nn.Dropout(p=dropout)
         )
@@ -483,7 +563,8 @@ class MIEsitmator(nn.Module):
         out = self.proj(decoder_outputs)
         log_probs = self.ctc_proj(out).log_softmax(dim=2)
         log_probs = log_probs.transpose(1, 0)
-        ctc_loss = self.ctc(log_probs, target_phones, decoder_lengths, target_lengths)
+        ctc_loss = self.ctc(log_probs, target_phones,
+                            decoder_lengths, target_lengths)
         # average by number of frames since taco_loss is averaged.
         ctc_loss = (ctc_loss / decoder_lengths.float()).mean()
         return ctc_loss
@@ -512,7 +593,8 @@ class Tacotron2(nn.Module):
         if self.use_mmi:
             vocab_size = len(ctc_symbols)
             decoder_dim = hparams.decoder_rnn_dim
-            self.mi = MIEsitmator(vocab_size, decoder_dim, decoder_dim, dropout=0.5)
+            self.mi = MIEsitmator(vocab_size, decoder_dim,
+                                  decoder_dim, dropout=0.5)
         else:
             self.mi = None
 
@@ -536,7 +618,8 @@ class Tacotron2(nn.Module):
     def parse_output(self, outputs, output_lengths=None):
         if self.mask_padding and output_lengths is not None:
             mask = ~get_mask_from_lengths(output_lengths)
-            mel_mask = mask.expand(self.n_mel_channels, mask.size(0), mask.size(1))
+            mel_mask = mask.expand(self.n_mel_channels,
+                                   mask.size(0), mask.size(1))
             mel_mask = mel_mask.permute(1, 0, 2)
 
             if outputs[0] is not None:
@@ -544,7 +627,8 @@ class Tacotron2(nn.Module):
                 outputs[0] = outputs[0] * float_mask
             outputs[1].data.masked_fill_(mel_mask, 0.0)
             outputs[2].data.masked_fill_(mel_mask, 0.0)
-            outputs[3].data.masked_fill_(mel_mask[:, 0, :], 1e3)  # gate energies
+            outputs[3].data.masked_fill_(
+                mel_mask[:, 0, :], 1e3)  # gate energies
 
         return outputs
 
@@ -554,7 +638,8 @@ class Tacotron2(nn.Module):
 
         if self.drop_frame_rate > 0. and self.training:
             # mels shape (B, n_mel_channels, T_out),
-            mels = dropout_frame(mels, self.global_mean, output_lengths, self.drop_frame_rate)
+            mels = dropout_frame(mels, self.global_mean,
+                                 output_lengths, self.drop_frame_rate)
 
         embedded_inputs = self.embedding(text_inputs).transpose(1, 2)
 
@@ -567,8 +652,135 @@ class Tacotron2(nn.Module):
         mel_outputs_postnet = mel_outputs + mel_outputs_postnet
 
         return self.parse_output(
-            [decoder_outputs, mel_outputs, mel_outputs_postnet, gate_outputs, alignments],
+            [decoder_outputs, mel_outputs,
+                mel_outputs_postnet, gate_outputs, alignments],
             output_lengths)
+
+    def inference(self, inputs):
+        embedded_inputs = self.embedding(inputs).transpose(1, 2)
+        encoder_outputs = self.encoder.inference(embedded_inputs)
+        mel_outputs, gate_outputs, alignments = self.decoder.inference(
+            encoder_outputs)
+
+        mel_outputs_postnet = self.postnet(mel_outputs)
+        mel_outputs_postnet = mel_outputs + mel_outputs_postnet
+
+        outputs = self.parse_output(
+            [None, mel_outputs, mel_outputs_postnet, gate_outputs, alignments])
+
+        # keep the original interface
+        return outputs[1:]
+
+class DurationTacotron2(nn.Module):
+    def __init__(self, hparams):
+        super(Tacotron2, self).__init__()
+        self.mask_padding = hparams.mask_padding
+        self.fp16_run = hparams.fp16_run
+        self.n_mel_channels = hparams.n_mel_channels
+        self.n_frames_per_step = hparams.n_frames_per_step
+        self.embedding = nn.Embedding(
+            hparams.n_symbols, hparams.symbols_embedding_dim)
+        std = sqrt(2.0 / (hparams.n_symbols + hparams.symbols_embedding_dim))
+        val = sqrt(3.0) * std  # uniform bounds for std
+        self.embedding.weight.data.uniform_(-val, val)
+        self.encoder = Encoder(hparams)
+        #self.decoder = Decoder(hparams)
+        self.postnet = Postnet(hparams)
+        self.lr = LengthRegulator()
+        self.dur_pred = DurationPredictor(embed_dims,
+                                          conv_dims=durpred_conv_dims,
+                                          rnn_dims=durpred_rnn_dims,
+                                          dropout=durpred_dropout)
+        self.lstm = nn.LSTM(2 * prenet_dims,
+                    rnn_dim,
+                    batch_first=True,
+                    bidirectional=True)
+        self.drop_frame_rate = hparams.drop_frame_rate
+        self.use_mmi = hparams.use_mmi
+        if self.drop_frame_rate > 0.:
+            # global mean is not used at inference.
+            self.global_mean = getattr(hparams, 'global_mean', None)
+        if self.use_mmi:
+            vocab_size = len(ctc_symbols)
+            decoder_dim = hparams.decoder_rnn_dim
+            self.mi = MIEsitmator(vocab_size, decoder_dim,
+                                  decoder_dim, dropout=0.5)
+        else:
+            self.mi = None
+
+    def parse_batch(self, batch):
+        text_padded, input_lengths, mel_padded, gate_padded, \
+            output_lengths, ctc_text, ctc_text_lengths = batch
+        text_padded = to_gpu(text_padded).long()
+        input_lengths = to_gpu(input_lengths).long()
+        max_len = torch.max(input_lengths.data).item()
+        mel_padded = to_gpu(mel_padded).float()
+        gate_padded = to_gpu(gate_padded).float()
+        output_lengths = to_gpu(output_lengths).long()
+        ctc_text = to_gpu(ctc_text).long()
+        ctc_text_lengths = to_gpu(ctc_text_lengths).long()
+
+        return (
+            (text_padded, input_lengths, mel_padded, max_len, output_lengths,
+             ctc_text, ctc_text_lengths),
+            (mel_padded, gate_padded))
+
+    def parse_output(self, outputs, output_lengths=None):
+        if self.mask_padding and output_lengths is not None:
+            mask = ~get_mask_from_lengths(output_lengths)
+            mel_mask = mask.expand(self.n_mel_channels,
+                                   mask.size(0), mask.size(1))
+            mel_mask = mel_mask.permute(1, 0, 2)
+
+            if outputs[0] is not None:
+                float_mask = (~mask).float().unsqueeze(1)
+                outputs[0] = outputs[0] * float_mask
+            outputs[1].data.masked_fill_(mel_mask, 0.0)
+            outputs[2].data.masked_fill_(mel_mask, 0.0)
+            outputs[3].data.masked_fill_(
+                mel_mask[:, 0, :], 1e3)  # gate energies
+
+        return outputs
+
+    def forward(self, inputs):
+        text_inputs, text_lengths, mels, max_len, output_lengths, durations, *_ = inputs
+        text_lengths, output_lengths = text_lengths.data, output_lengths.data
+        
+        # dur predictions
+        dur_hat = self.dur_pred(text_inputs)
+        dur_hat = dur_hat.squeeze()
+        
+        print(f"text input shape {text_inputs.shape}")
+        # embedding -> encoder (conv + blstm) -> duration expansion
+        # -> 2 LSTM layers (originally decoder) -> linear projection -> postnet with skip
+        embedded_inputs = self.embedding(text_inputs).transpose(1, 2)
+        print(f"embedded input shape {embedded_inputs.shape}")
+
+        encoder_outputs = self.encoder(embedded_inputs, text_lengths)
+        print(f"encoder outputs shape {encoder_outputs.shape}")
+
+        # prenet?
+        # x = self.prenet(x)
+
+        # instead of attention we expand states
+        expanded_encoder_outputs = self.lr(encoder_outputs, durations)
+
+        # "decoder" blstms and lin project
+        decoder_outputs, _ = self.lstm(expanded_encoder_outputs)
+        decoder_outputs = F.dropout(decoder_outputs,
+                      p=self.dropout,
+                      training=self.training)
+        mel_outputs = self.lin(decoder_outputs)
+        #x = x.transpose(1, 2)
+
+        # postnet with residual
+        mel_outputs_postnet = self.postnet(mel_outputs)
+        mel_outputs_postnet = mel_outputs + mel_outputs_postnet
+
+        #x_post = self.pad(x_post, mel.size(2))
+        #x = self.pad(x, mel.size(2))
+        return mel_outputs, mel_outputs_postnet, dur_hat
+
 
     def inference(self, inputs):
         embedded_inputs = self.embedding(inputs).transpose(1, 2)
