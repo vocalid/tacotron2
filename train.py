@@ -301,8 +301,10 @@ def train(experiment, output_directory, log_directory, checkpoint_path, warm_sta
                 if rank == 0:
                     checkpoint_path = os.path.join(
                         output_directory, "checkpoint_{}".format(iteration))
+                    best_checkpoint_path = os.path.join(
+                        output_directory, "checkpoint_best".format(iteration))
                     save_checkpoint(model, optimizer, learning_rate, iteration,
-                                    checkpoint_path)
+                                    best_checkpoint_path)
 
             iteration += 1
 
