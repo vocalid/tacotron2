@@ -104,7 +104,7 @@ class TextMelLoader(torch.utils.data.Dataset):
         mel = None
         if not dummy_mel:
             mel = self.get_mel(audiopath)
-        return (text, ctc_text, mel)
+        return (text, ctc_text, mel, filename)
 
     def get_mel(self, filename):
         if not self.load_mel_from_disk:
@@ -186,11 +186,14 @@ class TextMelCollate():
         gate_padded = torch.FloatTensor(len(batch), max_target_len)
         gate_padded.zero_()
         output_lengths = torch.LongTensor(len(batch))
+        filenames = []
         for i in range(len(ids_sorted_decreasing)):
             mel = batch[ids_sorted_decreasing[i]][2]
             mel_padded[i, :, :mel.size(1)] = mel
             gate_padded[i, mel.size(1)-1:] = 1
             output_lengths[i] = mel.size(1)
+            # add filenames
+            filenames.append(batch[ids_sorted_decreasing[i]][3])
 
         return text_padded, input_lengths, mel_padded, gate_padded, \
-            output_lengths, ctc_text_paded, ctc_text_lengths
+            output_lengths, ctc_text_paded, ctc_text_lengths, filenames

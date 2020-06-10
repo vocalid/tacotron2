@@ -169,6 +169,32 @@ def calculate_global_mean(data_loader, global_mean_npy):
     return global_mean
 
 
+def create_gta_features(model,
+                        train_set: DataLoader,
+                        val_set: DataLoader,
+                        save_path: Path):
+    model.eval()
+    device = next(model.parameters()).device  # use same device as model parameters
+    iters = len(train_set) + len(val_set)
+    dataset = itertools.chain(train_set, val_set)
+        return text_padded, input_lengths, mel_padded, gate_padded, \
+            output_lengths, ctc_text_paded, ctc_text_lengths, filenames
+    for i, (x, x_lens, mels, _, mel_lens, _, _, ids) in enumerate(dataset, 1):
+        x, mels = x.to(device), mels.to(device)
+        with torch.no_grad():
+            _, gta, _ = model(x, mels)
+            #x, y = model.parse_batch(batch)
+            #y_pred = model(x)
+        gta = gta.cpu().numpy()
+        for j, item_id in enumerate(ids):
+            mel = gta[j][:, :mel_lens[j]]
+            mel = (mel + 4) / 8
+            np.save(str(save_path/f'{item_id}.npy'), mel, allow_pickle=False)
+        bar = progbar(i, iters)
+        msg = f'{bar} {i}/{iters} Batches '
+        stream(msg)
+
+
 def train(experiment, output_directory, log_directory, checkpoint_path, warm_start, n_gpus,
           rank, group_name, hparams, max_steps=150000):
     """Training and validation logging results to tensorboard and stdout
@@ -180,7 +206,7 @@ def train(experiment, output_directory, log_directory, checkpoint_path, warm_sta
     checkpoint_path(string): checkpoint path
     n_gpus (int): number of gpus
     rank (int): rank of current gpu
-    hparams (object): comma separated list of "name=value" pairs.
+    hparams (object): hparams object containing configuration.
     """
     if hparams.distributed_run:
         init_distributed(hparams, n_gpus, rank, group_name)
@@ -231,6 +257,7 @@ def train(experiment, output_directory, log_directory, checkpoint_path, warm_sta
     is_overflow = False
     # ================ MAIN TRAINNIG LOOP! ===================
     #for epoch in range(epoch_offset, hparams.epochs):
+    epoch = epoch_offset
     while iteration < max_steps:
         print("Epoch: {}".format(epoch))
         for i, batch in enumerate(train_loader):
@@ -308,6 +335,7 @@ def train(experiment, output_directory, log_directory, checkpoint_path, warm_sta
                                     best_checkpoint_path)
 
             iteration += 1
+        epoch += 1
 
 
 if __name__ == '__main__':
