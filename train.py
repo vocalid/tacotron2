@@ -170,7 +170,7 @@ def calculate_global_mean(data_loader, global_mean_npy):
 
 
 def train(experiment, output_directory, log_directory, checkpoint_path, warm_start, n_gpus,
-          rank, group_name, hparams):
+          rank, group_name, hparams, max_steps=150000):
     """Training and validation logging results to tensorboard and stdout
 
     Params
@@ -230,7 +230,8 @@ def train(experiment, output_directory, log_directory, checkpoint_path, warm_sta
     model.train()
     is_overflow = False
     # ================ MAIN TRAINNIG LOOP! ===================
-    for epoch in range(epoch_offset, hparams.epochs):
+    #for epoch in range(epoch_offset, hparams.epochs):
+    while iteration < max_steps:
         print("Epoch: {}".format(epoch))
         for i, batch in enumerate(train_loader):
             start = time.perf_counter()
