@@ -174,7 +174,6 @@ def calculate_global_mean(data_loader, global_mean_npy):
 def create_gta_features(experiment, model,
                         train_set: DataLoader,
                         val_set: DataLoader):
-    #TODO: audiopath|melgtpath|melgtapath|nothing|transcript
     feat_path = experiment.paths["acoustic2wavegen_training_features"]
     gta_path = os.path.join(feat_path, "gta")
     os.makedirs(gta_path, exist_ok=True)
@@ -204,9 +203,11 @@ def create_gta_features(experiment, model,
                 mel = gta[j][:, :mel_lens[j]]
                 # mel = (mel + 4) / 8 TODO?
                 gta_file = os.path.join(gta_path, f'{item_id}.npy')
-                audio_path = os.path.join(experiment.paths["acoustic_features"], "wav", f"audio-{item_id}.npy")
-                mel_path = os.path.join(experiment.paths["acoustic_features"], "mel", f"mel-{item_id}.npy")
+                audio_file = os.path.join(experiment.paths["acoustic_features"], "wav", f"audio-{item_id}.npy")
+                mel_file = os.path.join(experiment.paths["acoustic_features"], "mel", f"mel-{item_id}.npy")
                 np.save(gta_file, mel, allow_pickle=False)
+                # audiopath|melgtpath|melgtapath|nothing|transcript
+                map_file_fp.write(f"{audio_file}|{mel_file}|{gta_file}|<no_g>|\n")
             msg = f'{i}/{iters} Batches '
             print(msg)
 
