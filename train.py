@@ -2,6 +2,8 @@ import os
 import time
 import argparse
 import math
+from pathlib import Path
+import itertools
 import numpy as np
 from numpy import finfo
 
@@ -169,30 +171,44 @@ def calculate_global_mean(data_loader, global_mean_npy):
     return global_mean
 
 
-def create_gta_features(model,
+def create_gta_features(experiment, model,
                         train_set: DataLoader,
-                        val_set: DataLoader,
-                        save_path: Path):
+                        val_set: DataLoader):
+    #TODO: audiopath|melgtpath|melgtapath|nothing|transcript
+    feat_path = experiment.paths["acoustic2wavegen_training_features"]
+    gta_path = os.path.join(feat_path, "gta")
+    os.makedirs(gta_path, exist_ok=True)
+    map_file = os.path.join(feat_path, "map.txt")
     model.eval()
     device = next(model.parameters()).device  # use same device as model parameters
     iters = len(train_set) + len(val_set)
     dataset = itertools.chain(train_set, val_set)
-        return text_padded, input_lengths, mel_padded, gate_padded, \
-            output_lengths, ctc_text_paded, ctc_text_lengths, filenames
-    for i, (x, x_lens, mels, _, mel_lens, _, _, ids) in enumerate(dataset, 1):
-        x, mels = x.to(device), mels.to(device)
-        with torch.no_grad():
-            _, gta, _ = model(x, mels)
-            #x, y = model.parse_batch(batch)
-            #y_pred = model(x)
-        gta = gta.cpu().numpy()
-        for j, item_id in enumerate(ids):
-            mel = gta[j][:, :mel_lens[j]]
-            mel = (mel + 4) / 8
-            np.save(str(save_path/f'{item_id}.npy'), mel, allow_pickle=False)
-        bar = progbar(i, iters)
-        msg = f'{bar} {i}/{iters} Batches '
-        stream(msg)
+    #dataloader gets text_padded, input_lengths, mel_padded, gate_padded, \
+    #  output_lengths, ctc_text_paded, ctc_text_lengths, filenames
+    with open(map_file, "wt") as map_file_fp:
+        for i, batch in enumerate(dataset, 1):
+            (text_input, text_input_lens, mels, _, mel_lens, _, _, ids) = batch
+            # [None, mel_outputs, mel_outputs_postnet, gate_outputs, alignments])
+            #_, mel_out, mel_out_postnet, gate_out, alignments = model_output
+            #x, mels = x.to(device), mels.to(device)
+            with torch.no_grad():
+                #_, gta, _ = model(x, mels)
+                #_, mel_out, mel_out_postnet, _, alignment = model(x, mels)
+                x, y = model.parse_batch(batch)
+                y_pred = model(x)
+            #gta = gta.cpu().numpy()
+            _, mel_out, mel_out_postnet, gate_out, alignments = y_pred
+            gta = mel_out_postnet.cpu().numpy()
+            # iterate over items in batch
+            for j, item_id in enumerate(ids):
+                mel = gta[j][:, :mel_lens[j]]
+                # mel = (mel + 4) / 8 TODO?
+                gta_file = os.path.join(gta_path, f'{item_id}.npy')
+                audio_path = os.path.join(experiment.paths["acoustic_features"], "wav", f"audio-{item_id}.npy")
+                mel_path = os.path.join(experiment.paths["acoustic_features"], "mel", f"mel-{item_id}.npy")
+                np.save(gta_file, mel, allow_pickle=False)
+            msg = f'{i}/{iters} Batches '
+            print(msg)
 
 
 def train(experiment, output_directory, log_directory, checkpoint_path, warm_start, n_gpus,
@@ -336,6 +352,12 @@ def train(experiment, output_directory, log_directory, checkpoint_path, warm_sta
 
             iteration += 1
         epoch += 1
+
+    # generate GTA features and leave
+    val_loader = DataLoader(valset, num_workers=0,
+                            shuffle=False, batch_size=hparams.batch_size,
+                            pin_memory=False, collate_fn=collate_fn)
+    create_gta_features(experiment, model, train_loader, val_loader)
 
 
 if __name__ == '__main__':
