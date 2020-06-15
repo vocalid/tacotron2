@@ -171,6 +171,29 @@ def calculate_global_mean(data_loader, global_mean_npy):
     return global_mean
 
 
+def create_align_features(model,
+                          train_set: DataLoader,
+                          val_set: DataLoader,
+                          save_path: Path):
+
+    attn = np_now(attn)
+    bs, chars = attn.shape[0], attn.shape[2]
+    argmax = np.argmax(attn[:, :, :], axis=2)
+    mel_counts = np.zeros(shape=(bs, chars), dtype=np.int32)
+    for b in range(bs):
+        # fix random jumps in attention 
+        # go along the inputs
+        for j in range(1, argmax.shape[1]):
+            # difference between the "center"
+            if abs(argmax[b, j] - argmax[b, j-1]) > 10:
+                argmax[b, j] = argmax[b, j-1]
+        count = np.bincount(argmax[b, :mel_lens[b]])
+        mel_counts[b, :len(count)] = count[:len(count)]
+
+    for j, item_id in enumerate(ids):
+        np.save(str(save_path / f'{item_id}.npy'), mel_counts[j, :], allow_pickle=False)
+
+
 def create_gta_features(experiment, model,
                         train_set: DataLoader,
                         val_set: DataLoader):
@@ -205,7 +228,7 @@ def create_gta_features(experiment, model,
                 gta_file = os.path.join(gta_path, f'{item_id}.npy')
                 audio_file = os.path.join(experiment.paths["acoustic_features"], "wav", f"audio-{item_id}.npy")
                 mel_file = os.path.join(experiment.paths["acoustic_features"], "mel", f"mel-{item_id}.npy")
-                np.save(gta_file, mel, allow_pickle=False)
+                np.save(gta_file, mel.T, allow_pickle=False)
                 # audiopath|melgtpath|melgtapath|nothing|transcript
                 map_file_fp.write(f"{audio_file}|{mel_file}|{gta_file}|<no_g>|\n")
             msg = f'{i}/{iters} Batches '
