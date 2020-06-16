@@ -197,7 +197,11 @@ def create_align_features(attn, mel_lens, ids, dur_path):
 
     for j, item_id in enumerate(ids):
         dur_file = os.path.join(dur_path, f'{item_id}.npy')
-        np.save(dur_file, mel_counts[j, :], allow_pickle=False)
+        np.save(dur_file, np.trim_zeros(mel_counts[j, :], 'b'), allow_pickle=False)
+        #print(f"Saving durs for {item_id}")
+        #print(f"argmax: {argmax[j]}")
+        #print(f"Saving mel_counts: {np.trim_zeros(mel_counts[j, :], 'b')}")
+        #print(f"Saving mel_lens: {mel_lens[j]}")
 
 
 def create_gta_features(experiment, model,

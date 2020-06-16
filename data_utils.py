@@ -34,7 +34,7 @@ class TextMelLoader(torch.utils.data.Dataset):
         #TODO: will go to preprocessing
         self.textanalyzer = TextAnalyzer(use_phones=hparams.use_phonemes,
                                          g2p_backend=hparams.g2p_backend, language=hparams.language)
-        self._phone_cache_dir = os.path.join(experiment.paths["acoustic_features"], "_phone_cache")
+        self._phone_cache_dir = os.path.join(experiment.paths["acoustic_features"], "utt")
         self._hparams = hparams
         print(f"Creating new in-memory phone cache")
         self._phoneme_cache = {}
@@ -66,7 +66,7 @@ class TextMelLoader(torch.utils.data.Dataset):
         np.save(os.path.join(cache_dir, fn), ph_seq)
 
     def _save_utterance(self, cache_dir, filename, utt):
-        fn = filename.replace("audio-", "utt-").replace(".npy", ".txt")
+        fn = filename.replace("audio-", "utt-").replace(".npy", "") + ".txt"
         with open(os.path.join(cache_dir, fn), 'wt') as fp:
             fp.write(str(utt))
 
