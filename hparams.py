@@ -79,6 +79,8 @@ def create_hparams(hparams_string=None, verbose=False):
         ################################
         # Model Parameters             #
         ################################
+        model_type="tacotron2",  # tacotron2, forwardtacotron, durationtacotron2
+
         n_symbols=None,
         symbols_embedding_dim=512,
 

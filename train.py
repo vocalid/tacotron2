@@ -14,7 +14,7 @@ from torch.utils.data.distributed import DistributedSampler
 from torch.utils.data import DataLoader
 
 import gradient_adaptive_factor
-from model import Tacotron2
+from model import Tacotron2, ForwardTacotron, DurationTacotron2
 from data_utils import TextMelLoader, TextMelCollate
 from loss_function import Tacotron2Loss
 from logger import Tacotron2Logger
@@ -76,7 +76,16 @@ def prepare_directories_and_logger(output_directory, log_directory, rank):
 
 
 def load_model(hparams, device="cuda"):
-    model = Tacotron2(hparams).to(device)
+    if hparams.model_type == "tacotron2":
+        model = Tacotron2(hparams).to(device)
+        model.requires_durations = False
+    elif hparams.model_type == "forwardtacotron":
+        model = ForwardTacotron(num_chars=hparams.n_symbols, n_mels=hparams.n_mel_channels).to(device)
+        model.requires_durations = True
+    elif hparams.model_type == "durationtacotron2":
+        model = DurationTacotron2().to(device)
+        model.requires_durations = True
+
     if hparams.fp16_run:
         model.decoder.attention_layer.score_mask_value = finfo('float16').min
 
@@ -160,7 +169,7 @@ def calculate_global_mean(data_loader, global_mean_npy):
     print('calculating global mean...')
     for i, batch in enumerate(data_loader):
         (text_padded, input_lengths, mel_padded, gate_padded,
-         output_lengths, ctc_text, ctc_text_lengths) = batch
+         output_lengths, ctc_text, ctc_text_lengths, ids) = batch
         # padded values are 0.
         sums.append(mel_padded.double().sum(dim=(0, 2)))
         frames.append(output_lengths.double().sum())
@@ -171,12 +180,8 @@ def calculate_global_mean(data_loader, global_mean_npy):
     return global_mean
 
 
-def create_align_features(model,
-                          train_set: DataLoader,
-                          val_set: DataLoader,
-                          save_path: Path):
-
-    attn = np_now(attn)
+def create_align_features(attn, mel_lens, ids, dur_path):
+    attn = attn.data.cpu().numpy()
     bs, chars = attn.shape[0], attn.shape[2]
     argmax = np.argmax(attn[:, :, :], axis=2)
     mel_counts = np.zeros(shape=(bs, chars), dtype=np.int32)
@@ -191,7 +196,8 @@ def create_align_features(model,
         mel_counts[b, :len(count)] = count[:len(count)]
 
     for j, item_id in enumerate(ids):
-        np.save(str(save_path / f'{item_id}.npy'), mel_counts[j, :], allow_pickle=False)
+        dur_file = os.path.join(dur_path, f'{item_id}.npy')
+        np.save(dur_file, mel_counts[j, :], allow_pickle=False)
 
 
 def create_gta_features(experiment, model,
@@ -200,6 +206,8 @@ def create_gta_features(experiment, model,
     feat_path = experiment.paths["acoustic2wavegen_training_features"]
     gta_path = os.path.join(feat_path, "gta")
     os.makedirs(gta_path, exist_ok=True)
+    dur_path = os.path.join(feat_path, "dur")
+    os.makedirs(dur_path, exist_ok=True)
     map_file = os.path.join(feat_path, "map.txt")
     model.eval()
     device = next(model.parameters()).device  # use same device as model parameters
@@ -220,6 +228,7 @@ def create_gta_features(experiment, model,
                 y_pred = model(x)
             #gta = gta.cpu().numpy()
             _, mel_out, mel_out_postnet, gate_out, alignments = y_pred
+            create_align_features(alignments, mel_lens, ids, dur_path)
             gta = mel_out_postnet.cpu().numpy()
             # iterate over items in batch
             for j, item_id in enumerate(ids):
@@ -254,6 +263,7 @@ def train(experiment, output_directory, log_directory, checkpoint_path, warm_sta
     torch.manual_seed(hparams.seed)
     torch.cuda.manual_seed(hparams.seed)
 
+    global_mean_path = os.path.join(experiment.paths["acoustic_features"], "global_mean.npy")
     train_loader, valset, collate_fn = prepare_dataloaders(experiment, hparams)
     if hparams.drop_frame_rate > 0.:
         global_mean = calculate_global_mean(train_loader, hparams.global_mean_npy)

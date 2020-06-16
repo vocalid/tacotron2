@@ -1,3 +1,5 @@
+from typing import Union
+from pathlib import Path
 from math import sqrt
 import numpy as np
 import torch
@@ -671,6 +673,228 @@ class Tacotron2(nn.Module):
         # keep the original interface
         return outputs[1:]
 
+
+class HighwayNetwork(nn.Module):
+    def __init__(self, size):
+        super().__init__()
+        self.W1 = nn.Linear(size, size)
+        self.W2 = nn.Linear(size, size)
+        self.W1.bias.data.fill_(0.)
+
+    def forward(self, x):
+        x1 = self.W1(x)
+        x2 = self.W2(x)
+        g = torch.sigmoid(x2)
+        y = g * F.relu(x1) + (1. - g) * x
+        return y
+
+
+class CBHG(nn.Module):
+    def __init__(self, K, in_channels, channels, proj_channels, num_highways):
+        super().__init__()
+
+        # List of all rnns to call `flatten_parameters()` on
+        self._to_flatten = []
+
+        self.bank_kernels = [i for i in range(1, K + 1)]
+        self.conv1d_bank = nn.ModuleList()
+        for k in self.bank_kernels:
+            conv = BatchNormConv(in_channels, channels, k)
+            self.conv1d_bank.append(conv)
+
+        self.maxpool = nn.MaxPool1d(kernel_size=2, stride=1, padding=1)
+
+        self.conv_project1 = BatchNormConv(
+            len(self.bank_kernels) * channels, proj_channels[0], 3)
+        self.conv_project2 = BatchNormConv(
+            proj_channels[0], proj_channels[1], 3, relu=False)
+
+        # Fix the highway input if necessary
+        if proj_channels[-1] != channels:
+            self.highway_mismatch = True
+            self.pre_highway = nn.Linear(
+                proj_channels[-1], channels, bias=False)
+        else:
+            self.highway_mismatch = False
+
+        self.highways = nn.ModuleList()
+        for i in range(num_highways):
+            hn = HighwayNetwork(channels)
+            self.highways.append(hn)
+
+        self.rnn = nn.GRU(channels, channels,
+                          batch_first=True, bidirectional=True)
+        self._to_flatten.append(self.rnn)
+
+        # Avoid fragmentation of RNN parameters and associated warning
+        self._flatten_parameters()
+
+    def forward(self, x):
+        # Although we `_flatten_parameters()` on init, when using DataParallel
+        # the model gets replicated, making it no longer guaranteed that the
+        # weights are contiguous in GPU memory. Hence, we must call it again
+        self._flatten_parameters()
+
+        # Save these for later
+        residual = x
+        seq_len = x.size(-1)
+        conv_bank = []
+
+        # Convolution Bank
+        for conv in self.conv1d_bank:
+            c = conv(x)  # Convolution
+            conv_bank.append(c[:, :, :seq_len])
+
+        # Stack along the channel axis
+        conv_bank = torch.cat(conv_bank, dim=1)
+
+        # dump the last padding to fit residual
+        x = self.maxpool(conv_bank)[:, :, :seq_len]
+
+        # Conv1d projections
+        x = self.conv_project1(x)
+        x = self.conv_project2(x)
+
+        # Residual Connect
+        x = x + residual
+
+        # Through the highways
+        x = x.transpose(1, 2)
+        if self.highway_mismatch is True:
+            x = self.pre_highway(x)
+        for h in self.highways:
+            x = h(x)
+
+        # And then the RNN
+        x, _ = self.rnn(x)
+        return x
+
+
+class ForwardTacotron(nn.Module):
+    def __init__(self,
+                 num_chars,
+                 embed_dims=256,
+                 durpred_conv_dims=256,
+                 durpred_rnn_dims=64,
+                 durpred_dropout=0.5,
+                 rnn_dim=512,
+                 prenet_k=16,
+                 prenet_dims=256,
+                 postnet_k=8,
+                 postnet_dims=256,
+                 highways=4,
+                 dropout=0.1,
+                 n_mels=80):
+
+        super().__init__()
+        self.rnn_dim = rnn_dim
+        self.embedding = nn.Embedding(num_chars, embed_dims)
+        self.lr = LengthRegulator()
+        self.dur_pred = DurationPredictor(embed_dims,
+                                          conv_dims=durpred_conv_dims,
+                                          rnn_dims=durpred_rnn_dims,
+                                          dropout=durpred_dropout)
+        self.prenet = CBHG(K=prenet_k,
+                           in_channels=embed_dims,
+                           channels=prenet_dims,
+                           proj_channels=[prenet_dims, embed_dims],
+                           num_highways=highways)
+        self.lstm = nn.LSTM(2 * prenet_dims,
+                            rnn_dim,
+                            batch_first=True,
+                            bidirectional=True)
+        self.lin = torch.nn.Linear(2 * rnn_dim, n_mels)
+        self.register_buffer('step', torch.zeros(1, dtype=torch.long))
+        self.postnet = CBHG(K=postnet_k,
+                            in_channels=n_mels,
+                            channels=postnet_dims,
+                            proj_channels=[postnet_dims, n_mels],
+                            num_highways=highways)
+        self.dropout = dropout
+        self.post_proj = nn.Linear(2 * postnet_dims, n_mels, bias=False)
+
+    def forward(self, x, mel, dur):
+        if self.training:
+            self.step += 1
+
+        x = self.embedding(x)
+        dur_hat = self.dur_pred(x)
+        dur_hat = dur_hat.squeeze()
+
+        x = x.transpose(1, 2)
+        x = self.prenet(x)
+        x = self.lr(x, dur)
+        x, _ = self.lstm(x)
+        x = F.dropout(x,
+                      p=self.dropout,
+                      training=self.training)
+        x = self.lin(x)
+        x = x.transpose(1, 2)
+
+        x_post = self.postnet(x)
+        x_post = self.post_proj(x_post)
+        x_post = x_post.transpose(1, 2)
+
+        x_post = self.pad(x_post, mel.size(2))
+        x = self.pad(x, mel.size(2))
+        return x, x_post, dur_hat
+
+    def generate(self, x, alpha=1.0):
+        self.eval()
+        # use same device as parameters
+        device = next(self.parameters()).device
+        x = torch.as_tensor(x, dtype=torch.long, device=device).unsqueeze(0)
+
+        x = self.embedding(x)
+        dur = self.dur_pred(x, alpha=alpha)
+        dur = dur.squeeze(2)
+
+        x = x.transpose(1, 2)
+        x = self.prenet(x)
+        x = self.lr(x, dur)
+        x, _ = self.lstm(x)
+        x = F.dropout(x,
+                      p=self.dropout,
+                      training=self.training)
+        x = self.lin(x)
+        x = x.transpose(1, 2)
+
+        x_post = self.postnet(x)
+        x_post = self.post_proj(x_post)
+        x_post = x_post.transpose(1, 2)
+
+        x, x_post, dur = x.squeeze(), x_post.squeeze(), dur.squeeze()
+        x = x.cpu().data.numpy()
+        x_post = x_post.cpu().data.numpy()
+        dur = dur.cpu().data.numpy()
+
+        return x, x_post, dur
+
+    def pad(self, x, max_len):
+        x = x[:, :, :max_len]
+        x = F.pad(x, [0, max_len - x.size(2), 0, 0], 'constant', 0.0)
+        return x
+
+    def get_step(self):
+        return self.step.data.item()
+
+    def load(self, path: Union[str, Path]):
+        # Use device of model params as location for loaded state
+        device = next(self.parameters()).device
+        state_dict = torch.load(path, map_location=device)
+        self.load_state_dict(state_dict, strict=False)
+
+    def save(self, path: Union[str, Path]):
+        # No optimizer argument because saving a model should not include data
+        # only relevant in the training process - it should only be properties
+        # of the model itself. Let caller take care of saving optimzier state.
+        torch.save(self.state_dict(), path)
+
+    def log(self, path, msg):
+        with open(path, 'a') as f:
+            print(msg, file=f)
+
+
 class DurationTacotron2(nn.Module):
     def __init__(self, hparams):
         super(Tacotron2, self).__init__()
@@ -692,9 +916,9 @@ class DurationTacotron2(nn.Module):
                                           rnn_dims=durpred_rnn_dims,
                                           dropout=durpred_dropout)
         self.lstm = nn.LSTM(2 * prenet_dims,
-                    rnn_dim,
-                    batch_first=True,
-                    bidirectional=True)
+                            rnn_dim,
+                            batch_first=True,
+                            bidirectional=True)
         self.drop_frame_rate = hparams.drop_frame_rate
         self.use_mmi = hparams.use_mmi
         if self.drop_frame_rate > 0.:
@@ -745,11 +969,11 @@ class DurationTacotron2(nn.Module):
     def forward(self, inputs):
         text_inputs, text_lengths, mels, max_len, output_lengths, durations, *_ = inputs
         text_lengths, output_lengths = text_lengths.data, output_lengths.data
-        
+
         # dur predictions
         dur_hat = self.dur_pred(text_inputs)
         dur_hat = dur_hat.squeeze()
-        
+
         print(f"text input shape {text_inputs.shape}")
         # embedding -> encoder (conv + blstm) -> duration expansion
         # -> 2 LSTM layers (originally decoder) -> linear projection -> postnet with skip
@@ -768,8 +992,8 @@ class DurationTacotron2(nn.Module):
         # "decoder" blstms and lin project
         decoder_outputs, _ = self.lstm(expanded_encoder_outputs)
         decoder_outputs = F.dropout(decoder_outputs,
-                      p=self.dropout,
-                      training=self.training)
+                                    p=self.dropout,
+                                    training=self.training)
         mel_outputs = self.lin(decoder_outputs)
         #x = x.transpose(1, 2)
 
@@ -780,7 +1004,6 @@ class DurationTacotron2(nn.Module):
         #x_post = self.pad(x_post, mel.size(2))
         #x = self.pad(x, mel.size(2))
         return mel_outputs, mel_outputs_postnet, dur_hat
-
 
     def inference(self, inputs):
         embedded_inputs = self.embedding(inputs).transpose(1, 2)
