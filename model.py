@@ -45,9 +45,9 @@ class DurationPredictor(nn.Module):
     def __init__(self, in_dims, conv_dims=256, rnn_dims=64, dropout=0.5):
         super().__init__()
         self.convs = torch.nn.ModuleList([
-            BatchNormConv(in_dims, conv_dims, 5, activation=torch.relu),
-            BatchNormConv(conv_dims, conv_dims, 5, activation=torch.relu),
-            BatchNormConv(conv_dims, conv_dims, 5, activation=torch.relu),
+            BatchNormConv(in_dims, conv_dims, 5, relu=True),
+            BatchNormConv(conv_dims, conv_dims, 5, relu=True),
+            BatchNormConv(conv_dims, conv_dims, 5, relu=True),
         ])
         self.rnn = nn.GRU(conv_dims, rnn_dims,
                           batch_first=True, bidirectional=True)
@@ -66,19 +66,16 @@ class DurationPredictor(nn.Module):
 
 
 class BatchNormConv(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel, activation=None):
+    def __init__(self, in_channels, out_channels, kernel, relu=True):
         super().__init__()
-        self.conv = nn.Conv1d(in_channels, out_channels,
-                              kernel, stride=1, padding=kernel // 2, bias=False)
+        self.conv = nn.Conv1d(in_channels, out_channels, kernel, stride=1, padding=kernel // 2, bias=False)
         self.bnorm = nn.BatchNorm1d(out_channels)
-        self.activation = activation
+        self.relu = relu
 
     def forward(self, x):
         x = self.conv(x)
-        if self.activation:
-            x = self.activation(x)
-        x = self.bnorm(x)
-        return x
+        x = F.relu(x) if self.relu is True else x
+        return self.bnorm(x)
 
 
 class LocationLayer(nn.Module):
@@ -602,7 +599,7 @@ class Tacotron2(nn.Module):
 
     def parse_batch(self, batch):
         text_padded, input_lengths, mel_padded, gate_padded, \
-            output_lengths, ctc_text, ctc_text_lengths, ids = batch
+            output_lengths, ctc_text, ctc_text_lengths, ids, durs = batch
         text_padded = to_gpu(text_padded).long()
         input_lengths = to_gpu(input_lengths).long()
         max_len = torch.max(input_lengths.data).item()
@@ -769,6 +766,11 @@ class CBHG(nn.Module):
         x, _ = self.rnn(x)
         return x
 
+    def _flatten_parameters(self):
+        """Calls `flatten_parameters` on all the rnns used by the WaveRNN. Used
+        to improve efficiency and avoid PyTorch yelling at us."""
+        [m.flatten_parameters() for m in self._to_flatten]
+
 
 class ForwardTacotron(nn.Module):
     def __init__(self,
@@ -813,7 +815,9 @@ class ForwardTacotron(nn.Module):
         self.dropout = dropout
         self.post_proj = nn.Linear(2 * postnet_dims, n_mels, bias=False)
 
-    def forward(self, x, mel, dur):
+    def forward(self, inputs):
+        text_inputs, text_lengths, mels, max_len, output_lengths, ctc_text, ctc_text_lengths, ids, durs = inputs
+        text_lengths, output_lengths = text_lengths.data, output_lengths.data
         if self.training:
             self.step += 1
 
@@ -823,7 +827,7 @@ class ForwardTacotron(nn.Module):
 
         x = x.transpose(1, 2)
         x = self.prenet(x)
-        x = self.lr(x, dur)
+        x = self.lr(x, durs)
         x, _ = self.lstm(x)
         x = F.dropout(x,
                       p=self.dropout,
@@ -835,8 +839,8 @@ class ForwardTacotron(nn.Module):
         x_post = self.post_proj(x_post)
         x_post = x_post.transpose(1, 2)
 
-        x_post = self.pad(x_post, mel.size(2))
-        x = self.pad(x, mel.size(2))
+        x_post = self.pad(x_post, mels.size(2))
+        x = self.pad(x, mels.size(2))
         return x, x_post, dur_hat
 
     def generate(self, x, alpha=1.0):
@@ -893,6 +897,25 @@ class ForwardTacotron(nn.Module):
     def log(self, path, msg):
         with open(path, 'a') as f:
             print(msg, file=f)
+
+    def parse_batch(self, batch):
+        text_padded, input_lengths, mel_padded, gate_padded, \
+            output_lengths, ctc_text, ctc_text_lengths, ids, durs  = batch
+        text_padded = to_gpu(text_padded).long()
+        input_lengths = to_gpu(input_lengths).long()
+        durs_padded = to_gpu(durs).long()
+        max_len = torch.max(input_lengths.data).item()
+        mel_padded = to_gpu(mel_padded).float()
+        gate_padded = to_gpu(gate_padded).float()
+        output_lengths = to_gpu(output_lengths).long()
+        ctc_text = to_gpu(ctc_text).long()
+        ctc_text_lengths = to_gpu(ctc_text_lengths).long()
+
+        return (
+            (text_padded, input_lengths, mel_padded, max_len, output_lengths,
+             ctc_text, ctc_text_lengths, durs_padded),
+            (mel_padded, gate_padded))
+
 
 
 class DurationTacotron2(nn.Module):

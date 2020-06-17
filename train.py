@@ -44,10 +44,10 @@ def init_distributed(hparams, n_gpus, rank, group_name):
     print("Done initializing distributed")
 
 
-def prepare_dataloaders(experiment, hparams):
+def prepare_dataloaders(experiment, hparams, requires_durations):
     # Get data, data loaders and collate function ready
-    trainset = TextMelLoader("train", experiment, hparams)
-    valset = TextMelLoader("valid", experiment, hparams)
+    trainset = TextMelLoader("train", experiment, hparams, requires_durations)
+    valset = TextMelLoader("valid", experiment, hparams, requires_durations)
     collate_fn = TextMelCollate(hparams.n_frames_per_step)
 
     if hparams.distributed_run:
@@ -61,7 +61,7 @@ def prepare_dataloaders(experiment, hparams):
                               sampler=train_sampler,
                               batch_size=hparams.batch_size, pin_memory=False,
                               drop_last=True, collate_fn=collate_fn)
-    return train_loader, valset, collate_fn
+    return train_loader, trainset, valset, collate_fn
 
 
 def prepare_directories_and_logger(output_directory, log_directory, rank):
@@ -207,10 +207,11 @@ def create_align_features(attn, mel_lens, ids, dur_path):
 def create_gta_features(experiment, model,
                         train_set: DataLoader,
                         val_set: DataLoader):
+    num_samples = 0
     feat_path = experiment.paths["acoustic2wavegen_training_features"]
     gta_path = os.path.join(feat_path, "gta")
     os.makedirs(gta_path, exist_ok=True)
-    dur_path = os.path.join(feat_path, "dur")
+    dur_path = os.path.join(experiment.paths["acoustic2wavegen_training_features"], "dur")
     os.makedirs(dur_path, exist_ok=True)
     map_file = os.path.join(feat_path, "map.txt")
     model.eval()
@@ -221,7 +222,7 @@ def create_gta_features(experiment, model,
     #  output_lengths, ctc_text_paded, ctc_text_lengths, filenames
     with open(map_file, "wt") as map_file_fp:
         for i, batch in enumerate(dataset, 1):
-            (text_input, text_input_lens, mels, _, mel_lens, _, _, ids) = batch
+            (text_input, text_input_lens, mels, _, mel_lens, _, _, ids, dur) = batch
             # [None, mel_outputs, mel_outputs_postnet, gate_outputs, alignments])
             #_, mel_out, mel_out_postnet, gate_out, alignments = model_output
             #x, mels = x.to(device), mels.to(device)
@@ -244,8 +245,10 @@ def create_gta_features(experiment, model,
                 np.save(gta_file, mel.T, allow_pickle=False)
                 # audiopath|melgtpath|melgtapath|nothing|transcript
                 map_file_fp.write(f"{audio_file}|{mel_file}|{gta_file}|<no_g>|\n")
+                num_samples += 1
             msg = f'{i}/{iters} Batches '
             print(msg)
+        print(f"Wrote {num_samples} GTA + dur samples")
 
 
 def train(experiment, output_directory, log_directory, checkpoint_path, warm_start, n_gpus,
@@ -267,13 +270,15 @@ def train(experiment, output_directory, log_directory, checkpoint_path, warm_sta
     torch.manual_seed(hparams.seed)
     torch.cuda.manual_seed(hparams.seed)
 
+    # create model - does not load weights yet
+    model = load_model(hparams)
+
     global_mean_path = os.path.join(experiment.paths["acoustic_features"], "global_mean.npy")
-    train_loader, valset, collate_fn = prepare_dataloaders(experiment, hparams)
+    train_loader, trainset, valset, collate_fn = prepare_dataloaders(experiment, hparams, model.requires_durations)
     if hparams.drop_frame_rate > 0.:
         global_mean = calculate_global_mean(train_loader, hparams.global_mean_npy)
         hparams.global_mean = global_mean
 
-    model = load_model(hparams)
     learning_rate = hparams.learning_rate
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate,
                                  weight_decay=hparams.weight_decay)
@@ -392,10 +397,13 @@ def train(experiment, output_directory, log_directory, checkpoint_path, warm_sta
         epoch += 1
 
     # generate GTA features and leave
+    train_loader_tmp = DataLoader(trainset, num_workers=0, shuffle=False,
+                              batch_size=hparams.batch_size, pin_memory=False,
+                              drop_last=False, collate_fn=collate_fn)
     val_loader = DataLoader(valset, num_workers=0,
                             shuffle=False, batch_size=hparams.batch_size,
-                            pin_memory=False, collate_fn=collate_fn)
-    create_gta_features(experiment, model, train_loader, val_loader)
+                            pin_memory=False, collate_fn=collate_fn, drop_last=False)
+    create_gta_features(experiment, model, train_loader_tmp, val_loader)
 
 
 if __name__ == '__main__':

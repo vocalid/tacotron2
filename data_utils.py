@@ -17,20 +17,25 @@ class TextMelLoader(torch.utils.data.Dataset):
         2) normalizes text and converts them to sequences of one-hot vectors
         3) computes mel-spectrograms from audio files.
     """
-    def __init__(self, dataset, experiment, hparams):
+    def __init__(self, dataset, experiment, hparams, load_durations):
+        self.experiment = experiment
         self.audiopaths_and_text = load_filepaths_and_text(dataset, experiment, hparams)
         self.text_cleaners = hparams.text_cleaners
         self.max_wav_value = hparams.max_wav_value
         self.sampling_rate = hparams.sampling_rate
         self.load_mel_from_disk = hparams.load_mel_from_disk
         self.hparams = hparams
+        self.load_durations = load_durations
+        self.durations_dir = os.path.join(experiment.paths["acoustic_features"], "dur")
         if hparams.preprocessing_type == "vocalid":
             # vocalid preprocessing is never on the fly
             self.load_mel_from_disk = True
-        self.stft = layers.TacotronSTFT(
-            hparams.filter_length, hparams.hop_length, hparams.win_length,
-            hparams.n_mel_channels, hparams.sampling_rate, hparams.mel_fmin,
-            hparams.mel_fmax)
+        else:
+            self.stft = layers.TacotronSTFT(
+                hparams.filter_length, hparams.hop_length, hparams.win_length,
+                hparams.n_mel_channels, hparams.sampling_rate, hparams.mel_fmin,
+                hparams.mel_fmax)
+
         #TODO: will go to preprocessing
         self.textanalyzer = TextAnalyzer(use_phones=hparams.use_phonemes,
                                          g2p_backend=hparams.g2p_backend, language=hparams.language)
@@ -44,7 +49,6 @@ class TextMelLoader(torch.utils.data.Dataset):
             self.get_mel_text_pair(paths, dummy_mel=True)
         random.seed(hparams.seed)
         random.shuffle(self.audiopaths_and_text)
-
 
     def _load_sequence(self, cache_dir, filename):
         fn = filename.replace("audio-", "phones-").replace(".npy", "")
@@ -104,7 +108,11 @@ class TextMelLoader(torch.utils.data.Dataset):
         mel = None
         if not dummy_mel:
             mel = self.get_mel(audiopath)
-        return (text, ctc_text, mel, filename)
+        if self.load_durations:
+            durations = np.load(os.path.join(self.durations_dir, filename + ".npy"))
+        else:
+            durations = None
+        return (text, ctc_text, mel, filename, durations)
 
     def get_mel(self, filename):
         if not self.load_mel_from_disk:
@@ -121,10 +129,9 @@ class TextMelLoader(torch.utils.data.Dataset):
             melspec = torch.from_numpy(np.load(filename))
             if self.hparams.preprocessing_type == "vocalid":
                 melspec = melspec.T
-            assert melspec.size(0) == self.stft.n_mel_channels, (
+            assert melspec.size(0) == self.hparams.n_mel_channels, (
                 'Mel dimension mismatch: given {}, expected {}'.format(
                     melspec.size(0), self.stft.n_mel_channels))
-
         return melspec
 
     def get_text(self, filename, text):
@@ -173,6 +180,21 @@ class TextMelCollate():
             ctc_text_paded[i, :ctc_text.size(0)] = ctc_text
             ctc_text_lengths[i] = ctc_text.size(0)
 
+        # Right zero-pad durations
+        if batch[0][4] is not None:
+            max_dur_len = max([len(x[4]) for x in batch])
+            dur_padded = torch.LongTensor(len(batch), max_dur_len)
+            dur_padded.zero_()
+            dur_lengths = torch.LongTensor(len(batch))
+            for i in range(len(ids_sorted_decreasing)):
+                dur = batch[ids_sorted_decreasing[i]][4]
+                dur_padded[i, :dur.size(0)] = dur 
+                #dur_lengths[i] = dur.size(0)
+                assert dur.size(0) == input_lengths[i]
+        else:
+            dur_padded = None
+
+
         # Right zero-pad mel-spec
         num_mels = batch[0][2].size(0)
         max_target_len = max([x[2].size(1) for x in batch])
@@ -196,4 +218,4 @@ class TextMelCollate():
             filenames.append(batch[ids_sorted_decreasing[i]][3])
 
         return text_padded, input_lengths, mel_padded, gate_padded, \
-            output_lengths, ctc_text_paded, ctc_text_lengths, filenames
+            output_lengths, ctc_text_paded, ctc_text_lengths, filenames, dur_padded
