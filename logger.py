@@ -9,15 +9,19 @@ class ForwardTacotronLogger(SummaryWriter):
     def __init__(self, logdir):
         super(ForwardTacotronLogger, self).__init__(logdir)
 
-    def log_training(self, total_loss, taco_loss, mi_loss, grad_norm,
+    def log_training(self, loginfo, total_loss, taco_loss, mi_loss, grad_norm,
                      gaf, learning_rate, duration, iteration):
-            self.add_scalar("fwdtaco/training.loss", total_loss, iteration)
-            self.add_scalar("fwdtaco/training.taco_loss", taco_loss, iteration)
-            #self.add_scalar("fwdtaco/training.mi_loss", mi_loss, iteration)
-            self.add_scalar("fwdtaco/grad.norm", grad_norm, iteration)
-            #self.add_scalar("fwdtaco/grad.gaf", gaf, iteration)
-            self.add_scalar("fwdtaco/learning.rate", learning_rate, iteration)
-            self.add_scalar("fwdtaco/duration", duration, iteration)
+            m1_loss, m2_loss, dur_loss = loginfo
+            self.add_scalar("forwardtaco/training.loss", total_loss, iteration)
+            self.add_scalar("forwardtaco/training.taco_loss", taco_loss, iteration)
+            self.add_scalar("forwardtaco/training.m1_loss", m1_loss, iteration)
+            self.add_scalar("forwardtaco/training.m2_loss", m2_loss, iteration)
+            self.add_scalar("forwardtaco/training.dur_loss", dur_loss, iteration)
+            #self.add_scalar("forwardtaco/training.mi_loss", mi_loss, iteration)
+            self.add_scalar("forwardtaco/grad.norm", grad_norm, iteration)
+            #self.add_scalar("forwardtaco/grad.gaf", gaf, iteration)
+            self.add_scalar("forwardtaco/learning.rate", learning_rate, iteration)
+            self.add_scalar("forwardtaco/duration", duration, iteration)
 
     def log_validation(self, reduced_loss, model, y, y_pred, iteration):
         self.add_scalar("validation.loss", reduced_loss, iteration)
@@ -61,7 +65,7 @@ class Tacotron2Logger(SummaryWriter):
     def __init__(self, logdir):
         super(Tacotron2Logger, self).__init__(logdir)
 
-    def log_training(self, total_loss, taco_loss, mi_loss, grad_norm,
+    def log_training(self, loginfo, total_loss, taco_loss, mi_loss, grad_norm,
                      gaf, learning_rate, duration, iteration):
             self.add_scalar("training.loss", total_loss, iteration)
             self.add_scalar("training.taco_loss", taco_loss, iteration)

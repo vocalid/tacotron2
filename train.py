@@ -342,7 +342,7 @@ def train(experiment, output_directory, log_directory, checkpoint_path, warm_sta
             dur =  x[7]
             y_pred = model(x)
 
-            loss = criterion(y_pred, y, mel_lens, dur)
+            loss, loginfo = criterion(y_pred, y, mel_lens, dur)
             if model.mi is not None:
                 # transpose to [b, T, dim]
                 decoder_outputs = y_pred[0].transpose(2, 1)
@@ -392,7 +392,7 @@ def train(experiment, output_directory, log_directory, checkpoint_path, warm_sta
                       "gaf {:.4f} {:.2f}s/it".format(
                     iteration, taco_loss, mi_loss, grad_norm, gaf, duration))
                 logger.log_training(
-                    reduced_loss, taco_loss, mi_loss, grad_norm, gaf,
+                    loginfo, reduced_loss, taco_loss, mi_loss, grad_norm, gaf,
                     learning_rate, duration, iteration)
 
             if not is_overflow and (iteration % hparams.iters_per_checkpoint == 0):

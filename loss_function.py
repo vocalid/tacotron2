@@ -18,7 +18,8 @@ class Tacotron2Loss(nn.Module):
         mel_loss = nn.MSELoss()(mel_out, mel_target) + \
             nn.MSELoss()(mel_out_postnet, mel_target)
         gate_loss = nn.BCEWithLogitsLoss()(gate_out, gate_target)
-        return mel_loss + gate_loss
+        loss = mel_loss + gate_loss
+        return loss, (loss.data.cpu().numpy())
 
 
 class ForwardTacotronLoss(torch.nn.Module):
@@ -39,7 +40,7 @@ class ForwardTacotronLoss(torch.nn.Module):
         m2_loss = self.forward_one(m2, target, mel_lens)
         dur_loss = F.l1_loss(dur_hat, dur)
         loss = m1_loss + m2_loss + dur_loss
-        return loss
+        return loss, (m1_loss.data.cpu().numpy(), m2_loss.data.cpu().numpy(), dur_loss.data.cpu().numpy())
 
 
 # Adapted from https://gist.github.com/jihunchoi/f1434a77df9db1bb337417854b398df1
