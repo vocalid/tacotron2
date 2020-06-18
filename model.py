@@ -793,7 +793,8 @@ class ForwardTacotron(nn.Module):
         super().__init__()
         self.rnn_dim = rnn_dim
         self.embedding = nn.Embedding(num_chars, embed_dims)
-        self.lr = LengthRegulator()
+        self.lr = LengthRegulator(hparams.positional_index)
+        self.positional_index_dim = 1 if hparams.positional_index else 0
         self.dur_pred = DurationPredictor(embed_dims,
                                           conv_dims=durpred_conv_dims,
                                           rnn_dims=durpred_rnn_dims,
@@ -803,7 +804,7 @@ class ForwardTacotron(nn.Module):
                            channels=prenet_dims,
                            proj_channels=[prenet_dims, embed_dims],
                            num_highways=highways)
-        self.lstm = nn.LSTM(2 * prenet_dims,
+        self.lstm = nn.LSTM(2 * prenet_dims + self.positional_index_dim,
                             rnn_dim,
                             batch_first=True,
                             bidirectional=True)
