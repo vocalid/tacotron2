@@ -110,6 +110,7 @@ class TextMelLoader(torch.utils.data.Dataset):
             mel = self.get_mel(audiopath)
         if self.load_durations:
             durations = np.load(os.path.join(self.durations_dir, filename + ".npy"))
+            durations = torch.IntTensor(durations)
         else:
             durations = None
         return (text, ctc_text, mel, filename, durations)
@@ -188,9 +189,9 @@ class TextMelCollate():
             dur_lengths = torch.LongTensor(len(batch))
             for i in range(len(ids_sorted_decreasing)):
                 dur = batch[ids_sorted_decreasing[i]][4]
-                dur_padded[i, :dur.size(0)] = dur 
+                dur_padded[i, :dur.shape[0]] = dur 
                 #dur_lengths[i] = dur.size(0)
-                assert dur.size(0) == input_lengths[i]
+                assert dur.shape[0] == input_lengths[i].item()
         else:
             dur_padded = None
 

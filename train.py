@@ -15,9 +15,9 @@ from torch.utils.data import DataLoader
 
 import gradient_adaptive_factor
 from model import Tacotron2, ForwardTacotron, DurationTacotron2
+from loss_function import Tacotron2Loss, ForwardTacotronLoss
+from logger import Tacotron2Logger, ForwardTacotronLogger
 from data_utils import TextMelLoader, TextMelCollate
-from loss_function import Tacotron2Loss
-from logger import Tacotron2Logger
 from hparams import create_hparams
 from utils import to_gpu
 
@@ -64,12 +64,15 @@ def prepare_dataloaders(experiment, hparams, requires_durations):
     return train_loader, trainset, valset, collate_fn
 
 
-def prepare_directories_and_logger(output_directory, log_directory, rank):
+def prepare_directories_and_logger(output_directory, log_directory, rank, model_type):
     if rank == 0:
         if not os.path.isdir(output_directory):
             os.makedirs(output_directory)
             os.chmod(output_directory, 0o775)
-        logger = Tacotron2Logger(os.path.join(output_directory, log_directory))
+        if model_type == "forwardtacotron":
+            logger = ForwardTacotronLogger(os.path.join(output_directory, log_directory))
+        else:
+            logger = Tacotron2Logger(os.path.join(output_directory, log_directory))
     else:
         logger = None
     return logger
@@ -145,8 +148,10 @@ def validate(model, criterion, valset, iteration, batch_size, n_gpus,
         val_loss = 0.0
         for i, batch in enumerate(val_loader):
             x, y = model.parse_batch(batch)
+            mel_lens = x[4]
+            dur =  x[7]
             y_pred = model(x)
-            loss = criterion(y_pred, y)
+            loss = criterion(y_pred, y, mel_lens, dur)
             if distributed_run:
                 reduced_val_loss = reduce_tensor(loss.data, n_gpus).item()
             else:
@@ -180,7 +185,7 @@ def calculate_global_mean(data_loader, global_mean_npy):
     return global_mean
 
 
-def create_align_features(attn, mel_lens, ids, dur_path):
+def create_align_features(attn, mel_lens, text_input_lens, ids, dur_path):
     attn = attn.data.cpu().numpy()
     bs, chars = attn.shape[0], attn.shape[2]
     argmax = np.argmax(attn[:, :, :], axis=2)
@@ -197,7 +202,8 @@ def create_align_features(attn, mel_lens, ids, dur_path):
 
     for j, item_id in enumerate(ids):
         dur_file = os.path.join(dur_path, f'{item_id}.npy')
-        np.save(dur_file, np.trim_zeros(mel_counts[j, :], 'b'), allow_pickle=False)
+        #np.save(dur_file, np.trim_zeros(mel_counts[j, :], 'b'), allow_pickle=False)
+        np.save(dur_file, mel_counts[j, :text_input_lens[j]], allow_pickle=False)
         #print(f"Saving durs for {item_id}")
         #print(f"argmax: {argmax[j]}")
         #print(f"Saving mel_counts: {np.trim_zeros(mel_counts[j, :], 'b')}")
@@ -211,7 +217,7 @@ def create_gta_features(experiment, model,
     feat_path = experiment.paths["acoustic2wavegen_training_features"]
     gta_path = os.path.join(feat_path, "gta")
     os.makedirs(gta_path, exist_ok=True)
-    dur_path = os.path.join(experiment.paths["acoustic2wavegen_training_features"], "dur")
+    dur_path = os.path.join(experiment.paths["acoustic_features"], "dur")
     os.makedirs(dur_path, exist_ok=True)
     map_file = os.path.join(feat_path, "map.txt")
     model.eval()
@@ -233,7 +239,7 @@ def create_gta_features(experiment, model,
                 y_pred = model(x)
             #gta = gta.cpu().numpy()
             _, mel_out, mel_out_postnet, gate_out, alignments = y_pred
-            create_align_features(alignments, mel_lens, ids, dur_path)
+            create_align_features(alignments, mel_lens, text_input_lens,  ids, dur_path)
             gta = mel_out_postnet.cpu().numpy()
             # iterate over items in batch
             for j, item_id in enumerate(ids):
@@ -291,10 +297,16 @@ def train(experiment, output_directory, log_directory, checkpoint_path, warm_sta
     if hparams.distributed_run:
         model = apply_gradient_allreduce(model)
 
-    criterion = Tacotron2Loss()
+    if hparams.model_type == "forwardtacotron":
+        print("Using ForwardTacotronLoss")
+        criterion = ForwardTacotronLoss()
+    else:
+        print("Using TacotronLoss")
+        criterion = Tacotron2Loss()
+
 
     logger = prepare_directories_and_logger(
-        output_directory, log_directory, rank)
+        output_directory, log_directory, rank, hparams.model_type)
 
 
     # Load checkpoint if one exists
@@ -326,9 +338,11 @@ def train(experiment, output_directory, log_directory, checkpoint_path, warm_sta
 
             model.zero_grad()
             x, y = model.parse_batch(batch)
+            mel_lens = x[4]
+            dur =  x[7]
             y_pred = model(x)
 
-            loss = criterion(y_pred, y)
+            loss = criterion(y_pred, y, mel_lens, dur)
             if model.mi is not None:
                 # transpose to [b, T, dim]
                 decoder_outputs = y_pred[0].transpose(2, 1)

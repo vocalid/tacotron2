@@ -814,14 +814,15 @@ class ForwardTacotron(nn.Module):
                             num_highways=highways)
         self.dropout = dropout
         self.post_proj = nn.Linear(2 * postnet_dims, n_mels, bias=False)
+        self.mi = None
 
     def forward(self, inputs):
-        text_inputs, text_lengths, mels, max_len, output_lengths, ctc_text, ctc_text_lengths, ids, durs = inputs
+        text_inputs, text_lengths, mels, max_len, output_lengths, ctc_text, ctc_text_lengths, durs = inputs
         text_lengths, output_lengths = text_lengths.data, output_lengths.data
         if self.training:
             self.step += 1
 
-        x = self.embedding(x)
+        x = self.embedding(text_inputs)
         dur_hat = self.dur_pred(x)
         dur_hat = dur_hat.squeeze()
 
@@ -841,7 +842,7 @@ class ForwardTacotron(nn.Module):
 
         x_post = self.pad(x_post, mels.size(2))
         x = self.pad(x, mels.size(2))
-        return x, x_post, dur_hat
+        return (x, x_post, dur_hat)
 
     def generate(self, x, alpha=1.0):
         self.eval()
