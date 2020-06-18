@@ -151,7 +151,7 @@ def validate(model, criterion, valset, iteration, batch_size, n_gpus,
             mel_lens = x[4]
             dur =  x[7]
             y_pred = model(x)
-            loss = criterion(y_pred, y, mel_lens, dur)
+            loss, loginfo = criterion(y_pred, y, mel_lens, dur)
             if distributed_run:
                 reduced_val_loss = reduce_tensor(loss.data, n_gpus).item()
             else:

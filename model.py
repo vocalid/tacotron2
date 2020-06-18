@@ -844,13 +844,13 @@ class ForwardTacotron(nn.Module):
         x = self.pad(x, mels.size(2))
         return (x, x_post, dur_hat)
 
-    def generate(self, x, alpha=1.0):
+    def inference(self, x, alpha=1.0):
         self.eval()
         # use same device as parameters
-        device = next(self.parameters()).device
-        x = torch.as_tensor(x, dtype=torch.long, device=device).unsqueeze(0)
+        #device = next(self.parameters()).device
+        #x = torch.as_tensor(x, dtype=torch.long, device=device).unsqueeze(0)
 
-        x = self.embedding(x)
+        x = self.embedding(x) #.transpose(1,2)
         dur = self.dur_pred(x, alpha=alpha)
         dur = dur.squeeze(2)
 
@@ -868,12 +868,12 @@ class ForwardTacotron(nn.Module):
         x_post = self.post_proj(x_post)
         x_post = x_post.transpose(1, 2)
 
-        x, x_post, dur = x.squeeze(), x_post.squeeze(), dur.squeeze()
-        x = x.cpu().data.numpy()
-        x_post = x_post.cpu().data.numpy()
-        dur = dur.cpu().data.numpy()
+        #x, x_post, dur = x.squeeze(), x_post.squeeze(), dur.squeeze()
+        #x = x.cpu().data.numpy()
+        #x_post = x_post.cpu().data.numpy()
+        #dur = dur.cpu().data.numpy()
 
-        return x, x_post, dur
+        return x, x_post, None, dur
 
     def pad(self, x, max_len):
         x = x[:, :, :max_len]

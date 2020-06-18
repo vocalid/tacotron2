@@ -24,7 +24,7 @@ class ForwardTacotronLogger(SummaryWriter):
             self.add_scalar("forwardtaco/duration", duration, iteration)
 
     def log_validation(self, reduced_loss, model, y, y_pred, iteration):
-        self.add_scalar("validation.loss", reduced_loss, iteration)
+        self.add_scalar("forwardtaco/validation.loss", reduced_loss, iteration)
         #_, _, mel_outputs, gate_outputs, alignments = y_pred
         m1, m2, dur_hat = y_pred
         mel_targets, gate_targets = y
