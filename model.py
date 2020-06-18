@@ -11,34 +11,36 @@ from utils import to_gpu, get_mask_from_lengths, dropout_frame
 from text.symbols import ctc_symbols
 
 
+# Adapted from
 # https://github.com/as-ideas/ForwardTacotron/blob/master/models/forward_tacotron.py
+# added positional index
 class LengthRegulator(nn.Module):
-    def __init__(self):
+    def __init__(self, posidx=False):
         super().__init__()
+        self.posidx = posidx
+        self.posidx_dim = 1 if posidx else 0
 
     def forward(self, x, dur):
         return self.expand(x, dur)
 
-    @staticmethod
-    def build_index(duration, x):
+    def expand(self, x, duration):
         duration[duration < 0] = 0
-        tot_duration = duration.cumsum(1).detach().cpu().numpy().astype('int')
-        max_duration = int(tot_duration.max().item())
-        index = np.zeros([x.shape[0], max_duration, x.shape[2]], dtype='long')
+        tot_duration = duration.cumsum(1).detach().cpu().numpy().astype('int') # cumulative duration per sample
+        max_duration = int(tot_duration.max().item()) # max duration for whole batch batch
+        # batch, timeline, latent dimensions (input text) 
+        expanded = torch.zeros(x.size(0), max_duration, x.size(2) + self.posidx_dim)
 
+        # loop i - batch, j - time
         for i in range(tot_duration.shape[0]):
             pos = 0
             for j in range(tot_duration.shape[1]):
+                # cumulative duration of given linguistic element j in batch i
                 pos1 = tot_duration[i, j]
-                index[i, pos:pos1, :] = j
+                expanded[i, pos:pos1, :expanded.shape[2] - self.posidx_dim] = x[i, j, :].repeat(pos1-pos, 1)
+                if self.posidx:
+                    expanded[i, pos:pos1, -self.posidx_dim] = torch.linspace(0.0, 1.0, pos1 - pos)
                 pos = pos1
-            index[i, pos:, :] = j
-        return torch.LongTensor(index).to(duration.device)
-
-    def expand(self, x, dur):
-        idx = self.build_index(dur, x)
-        y = torch.gather(x, 1, idx)
-        return y
+        return expanded.to(duration.device)
 
 
 class DurationPredictor(nn.Module):
@@ -850,24 +852,32 @@ class ForwardTacotron(nn.Module):
         #device = next(self.parameters()).device
         #x = torch.as_tensor(x, dtype=torch.long, device=device).unsqueeze(0)
 
+        print(f"x init {x.shape}")
         x = self.embedding(x) #.transpose(1,2)
+        print(f"x pre dur pred {x.shape}")
         dur = self.dur_pred(x, alpha=alpha)
         dur = dur.squeeze(2)
 
+        print(f"x pre prenet {x.shape}")
         x = x.transpose(1, 2)
         x = self.prenet(x)
+        print(f"x pre lr {x.shape}")
         x = self.lr(x, dur)
+        print(f"x pre lstm {x.shape}")
         x, _ = self.lstm(x)
         x = F.dropout(x,
                       p=self.dropout,
                       training=self.training)
+        print(f"x pre lin {x.shape}")
         x = self.lin(x)
         x = x.transpose(1, 2)
 
+        print(f"x pre postnet {x.shape}")
         x_post = self.postnet(x)
         x_post = self.post_proj(x_post)
         x_post = x_post.transpose(1, 2)
 
+        print(f"x post {x_post.shape}")
         #x, x_post, dur = x.squeeze(), x_post.squeeze(), dur.squeeze()
         #x = x.cpu().data.numpy()
         #x_post = x_post.cpu().data.numpy()
