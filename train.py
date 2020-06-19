@@ -238,8 +238,13 @@ def create_gta_features(experiment, model,
                 x, y = model.parse_batch(batch)
                 y_pred = model(x)
             #gta = gta.cpu().numpy()
-            _, mel_out, mel_out_postnet, gate_out, alignments = y_pred
-            create_align_features(alignments, mel_lens, text_input_lens,  ids, dur_path)
+            # regular Taco2
+            if dur is None:
+                _, mel_out, mel_out_postnet, _, alignments = y_pred
+                create_align_features(alignments, mel_lens, text_input_lens,  ids, dur_path)
+            # some duration based taco
+            else:
+                mel_out, mel_out_postnet, dur = y_pred
             gta = mel_out_postnet.cpu().numpy()
             # iterate over items in batch
             for j, item_id in enumerate(ids):
