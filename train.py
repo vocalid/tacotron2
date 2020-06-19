@@ -83,7 +83,7 @@ def load_model(hparams, device="cuda"):
         model = Tacotron2(hparams).to(device)
         model.requires_durations = False
     elif hparams.model_type == "forwardtacotron":
-        model = ForwardTacotron(num_chars=hparams.n_symbols, n_mels=hparams.n_mel_channels).to(device)
+        model = ForwardTacotron(hparams, num_chars=hparams.n_symbols, n_mels=hparams.n_mel_channels).to(device)
         model.requires_durations = True
     elif hparams.model_type == "durationtacotron2":
         model = DurationTacotron2().to(device)

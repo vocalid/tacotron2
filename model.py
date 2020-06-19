@@ -776,6 +776,7 @@ class CBHG(nn.Module):
 
 class ForwardTacotron(nn.Module):
     def __init__(self,
+                 hparams,
                  num_chars,
                  embed_dims=256,
                  durpred_conv_dims=256,
