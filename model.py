@@ -962,13 +962,13 @@ class ForwardTacotron(nn.Module):
                             bidirectional=True)
         self.lin = torch.nn.Linear(2 * rnn_dim, n_mels)
         self.register_buffer('step', torch.zeros(1, dtype=torch.long))
-        # self.postnet = CBHG(K=postnet_k,
-        #                    in_channels=n_mels,
-        #                    channels=postnet_dims,
-        #                    proj_channels=[postnet_dims, n_mels],
-        #                    num_highways=highways)
+        self.postnet = CBHG(K=postnet_k,
+                            in_channels=n_mels,
+                            channels=postnet_dims,
+                            proj_channels=[postnet_dims, n_mels],
+                            num_highways=highways)
         self.dropout = dropout
-        #self.post_proj = nn.Linear(2 * postnet_dims, n_mels, bias=False)
+        self.post_proj = nn.Linear(2 * postnet_dims, n_mels, bias=False)
         self.mi = None
 
     def forward(self, inputs):
@@ -996,13 +996,13 @@ class ForwardTacotron(nn.Module):
         x = self.lin(x)
         x = x.transpose(1, 2)
 
-        #x_post = self.postnet(x)
-        #x_post = self.post_proj(x_post)
-        #x_post = x_post.transpose(1, 2)
+        x_post = self.postnet(x)
+        x_post = self.post_proj(x_post)
+        x_post = x_post.transpose(1, 2)
 
-        #x_post = self.pad(x_post, mels.size(2))
+        x_post = self.pad(x_post, mels.size(2))
         x = self.pad(x, mels.size(2))
-        x_post = x
+        #x_post = x
         return (x, x_post, dur_hat)
 
     def inference(self, x, alpha=1.0):
@@ -1036,10 +1036,10 @@ class ForwardTacotron(nn.Module):
         x = x.transpose(1, 2)
 
         print(f"x pre postnet {x.shape}")
-        #x_post = self.postnet(x)
-        #x_post = self.post_proj(x_post)
-        #x_post = x_post.transpose(1, 2)
-        x_post = x
+        x_post = self.postnet(x)
+        x_post = self.post_proj(x_post)
+        x_post = x_post.transpose(1, 2)
+        #x_post = x
 
         print(f"x post {x_post.shape}")
         #x, x_post, dur = x.squeeze(), x_post.squeeze(), dur.squeeze()
