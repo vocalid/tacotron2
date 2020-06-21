@@ -28,7 +28,7 @@ class ForwardTacotronLoss(torch.nn.Module):
         max_len = target.size(1)
         mask = pad_mask(lens, max_len)
         mask = mask.unsqueeze(2).expand_as(x)
-        loss = F.l1_loss(
+        loss = F.mse_loss(
             x * mask, target * mask, reduction='sum')
         return loss / mask.sum()
 

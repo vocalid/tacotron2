@@ -1,3 +1,4 @@
+from collections import OrderedDict
 from typing import Union
 from pathlib import Path
 from math import sqrt
@@ -11,10 +12,78 @@ from utils import to_gpu, get_mask_from_lengths, dropout_frame
 from text.symbols import ctc_symbols
 
 
+class Conv(nn.Module):
+    """
+    Convolution Module
+    """
+
+    def __init__(self,
+                 in_channels,
+                 out_channels,
+                 kernel_size=1,
+                 stride=1,
+                 padding=0,
+                 dilation=1,
+                 bias=True,
+                 w_init='linear'):
+        """
+        :param in_channels: dimension of input
+        :param out_channels: dimension of output
+        :param kernel_size: size of kernel
+        :param stride: size of stride
+        :param padding: size of padding
+        :param dilation: dilation rate
+        :param bias: boolean. if True, bias is included.
+        :param w_init: str. weight inits with xavier initialization.
+        """
+        super(Conv, self).__init__()
+
+        self.conv = nn.Conv1d(in_channels,
+                              out_channels,
+                              kernel_size=kernel_size,
+                              stride=stride,
+                              padding=padding,
+                              dilation=dilation,
+                              bias=bias)
+
+        nn.init.xavier_uniform_(
+            self.conv.weight, gain=nn.init.calculate_gain(w_init))
+
+    def forward(self, x):
+        x = x.contiguous().transpose(1, 2)
+        x = self.conv(x)
+        x = x.contiguous().transpose(1, 2)
+
+        return x
+
+
+class Linear(nn.Module):
+    """
+    Linear Module
+    """
+
+    def __init__(self, in_dim, out_dim, bias=True, w_init='linear'):
+        """
+        :param in_dim: dimension of input
+        :param out_dim: dimension of output
+        :param bias: boolean. if True, bias is included.
+        :param w_init: str. weight inits with xavier initialization.
+        """
+        super(Linear, self).__init__()
+        self.linear_layer = nn.Linear(in_dim, out_dim, bias=bias)
+
+        nn.init.xavier_uniform_(
+            self.linear_layer.weight,
+            gain=nn.init.calculate_gain(w_init))
+
+    def forward(self, x):
+        return self.linear_layer(x)
+
+
 # Adapted from
 # https://github.com/as-ideas/ForwardTacotron/blob/master/models/forward_tacotron.py
 # added positional index
-class LengthRegulator(nn.Module):
+class LengthRegulatorOld(nn.Module):
     def __init__(self, posidx=False):
         super().__init__()
         self.posidx = posidx
@@ -25,10 +94,13 @@ class LengthRegulator(nn.Module):
 
     def expand(self, x, duration):
         duration[duration < 0] = 0
-        tot_duration = duration.cumsum(1).detach().cpu().numpy().astype('int') # cumulative duration per sample
-        max_duration = int(tot_duration.max().item()) # max duration for whole batch batch
-        # batch, timeline, latent dimensions (input text) 
-        expanded = torch.zeros(x.size(0), max_duration, x.size(2) + self.posidx_dim)
+        tot_duration = duration.cumsum(1).detach().cpu().numpy().astype(
+            'int')  # cumulative duration per sample
+        # max duration for whole batch batch
+        max_duration = int(tot_duration.max().item())
+        # batch, timeline, latent dimensions (input text)
+        expanded = torch.zeros(x.size(0), max_duration,
+                               x.size(2) + self.posidx_dim).to(x.device)
 
         # loop i - batch, j - time
         for i in range(tot_duration.shape[0]):
@@ -36,14 +108,88 @@ class LengthRegulator(nn.Module):
             for j in range(tot_duration.shape[1]):
                 # cumulative duration of given linguistic element j in batch i
                 pos1 = tot_duration[i, j]
-                expanded[i, pos:pos1, :expanded.shape[2] - self.posidx_dim] = x[i, j, :].repeat(pos1-pos, 1)
+                expanded[i, pos:pos1, :expanded.shape[2] -
+                         self.posidx_dim] = x[i, j, :].repeat(pos1-pos, 1)
                 if self.posidx:
-                    expanded[i, pos:pos1, -self.posidx_dim] = torch.linspace(0.0, 1.0, pos1 - pos)
+                    expanded[i, pos:pos1, -self.posidx_dim] = torch.linspace(
+                        0.0, 1.0, pos1 - pos).to(x.device)
                 pos = pos1
         return expanded.to(duration.device)
 
 
+class LengthRegulator(nn.Module):
+
+    def __init__(self, posidx):
+        super().__init__()
+
+    def forward(self, x, dur):
+        return self.expand(x, dur)
+
+    @staticmethod
+    def build_index(duration, x):
+        duration[duration < 0] = 0
+        tot_duration = duration.cumsum(1).detach().cpu().numpy().astype('int')
+        max_duration = int(tot_duration.max().item())
+        index = np.zeros([x.shape[0], max_duration, x.shape[2]], dtype='long')
+
+        for i in range(tot_duration.shape[0]):
+            pos = 0
+            for j in range(tot_duration.shape[1]):
+                pos1 = tot_duration[i, j]
+                index[i, pos:pos1, :] = j
+                pos = pos1
+            index[i, pos:, :] = j
+        return torch.LongTensor(index).to(duration.device)
+
+    def expand(self, x, dur):
+        idx = self.build_index(dur, x)
+        y = torch.gather(x, 1, idx)
+        return y
+
+
 class DurationPredictor(nn.Module):
+    """ Duration Predictor """
+
+    def __init__(self, in_dims, conv_dims=256, kernel_size=3, dropout=0.1):
+        super(DurationPredictor, self).__init__()
+
+        self.input_size = in_dims
+        self.filter_size = conv_dims
+        self.kernel = kernel_size
+        self.conv_output_size = conv_dims
+        self.dropout = dropout
+
+        self.conv_layer = nn.Sequential(OrderedDict([
+            ("conv1d_1", Conv(self.input_size,
+                              self.filter_size,
+                              kernel_size=self.kernel,
+                              padding=1)),
+            ("layer_norm_1", nn.LayerNorm(self.filter_size)),
+            ("relu_1", nn.ReLU()),
+            ("dropout_1", nn.Dropout(self.dropout)),
+            ("conv1d_2", Conv(self.filter_size,
+                              self.filter_size,
+                              kernel_size=self.kernel,
+                              padding=1)),
+            ("layer_norm_2", nn.LayerNorm(self.filter_size)),
+            ("relu_2", nn.ReLU()),
+            ("dropout_2", nn.Dropout(self.dropout))
+        ]))
+
+        self.linear_layer = Linear(self.conv_output_size, 1)
+        self.relu = nn.ReLU()
+
+    def forward(self, encoder_output, alpha=1.0):
+        out = self.conv_layer(encoder_output)
+        out = self.linear_layer(out)
+        out = self.relu(out)
+        out = out.squeeze()
+        if not self.training:
+            out = out.unsqueeze(0)
+        return out / alpha
+
+
+class DurationPredictorRNN(nn.Module):
     def __init__(self, in_dims, conv_dims=256, rnn_dims=64, dropout=0.5):
         super().__init__()
         self.convs = torch.nn.ModuleList([
@@ -70,7 +216,8 @@ class DurationPredictor(nn.Module):
 class BatchNormConv(nn.Module):
     def __init__(self, in_channels, out_channels, kernel, relu=True):
         super().__init__()
-        self.conv = nn.Conv1d(in_channels, out_channels, kernel, stride=1, padding=kernel // 2, bias=False)
+        self.conv = nn.Conv1d(in_channels, out_channels,
+                              kernel, stride=1, padding=kernel // 2, bias=False)
         self.bnorm = nn.BatchNorm1d(out_channels)
         self.relu = relu
 
@@ -781,7 +928,7 @@ class ForwardTacotron(nn.Module):
                  embed_dims=256,
                  durpred_conv_dims=256,
                  durpred_rnn_dims=64,
-                 durpred_dropout=0.5,
+                 durpred_dropout=0.1,
                  rnn_dim=512,
                  prenet_k=16,
                  prenet_dims=256,
@@ -796,28 +943,32 @@ class ForwardTacotron(nn.Module):
         self.embedding = nn.Embedding(num_chars, embed_dims)
         self.lr = LengthRegulator(hparams.positional_index)
         self.positional_index_dim = 1 if hparams.positional_index else 0
-        self.dur_pred = DurationPredictor(embed_dims,
-                                          conv_dims=durpred_conv_dims,
-                                          rnn_dims=durpred_rnn_dims,
-                                          dropout=durpred_dropout)
-        self.prenet = CBHG(K=prenet_k,
-                           in_channels=embed_dims,
-                           channels=prenet_dims,
-                           proj_channels=[prenet_dims, embed_dims],
-                           num_highways=highways)
+        # self.dur_pred = DurationPredictor(2 * prenet_dims,
+        #                                  conv_dims=durpred_conv_dims,
+        #                                  rnn_dims=durpred_rnn_dims,
+        #                                  dropout=durpred_dropout)
+        self.dur_pred = DurationPredictor(
+            2 * prenet_dims, dropout=durpred_dropout)
+        self.prenet = Prenet(embed_dims,
+                             [hparams.prenet_dim, hparams.prenet_dim])
+        self.cbhg = CBHG(K=prenet_k,
+                         in_channels=hparams.prenet_dim,
+                         channels=prenet_dims,
+                         proj_channels=[prenet_dims, embed_dims],
+                         num_highways=highways)
         self.lstm = nn.LSTM(2 * prenet_dims + self.positional_index_dim,
                             rnn_dim,
                             batch_first=True,
                             bidirectional=True)
         self.lin = torch.nn.Linear(2 * rnn_dim, n_mels)
         self.register_buffer('step', torch.zeros(1, dtype=torch.long))
-        self.postnet = CBHG(K=postnet_k,
-                            in_channels=n_mels,
-                            channels=postnet_dims,
-                            proj_channels=[postnet_dims, n_mels],
-                            num_highways=highways)
+        # self.postnet = CBHG(K=postnet_k,
+        #                    in_channels=n_mels,
+        #                    channels=postnet_dims,
+        #                    proj_channels=[postnet_dims, n_mels],
+        #                    num_highways=highways)
         self.dropout = dropout
-        self.post_proj = nn.Linear(2 * postnet_dims, n_mels, bias=False)
+        #self.post_proj = nn.Linear(2 * postnet_dims, n_mels, bias=False)
         self.mi = None
 
     def forward(self, inputs):
@@ -827,11 +978,16 @@ class ForwardTacotron(nn.Module):
             self.step += 1
 
         x = self.embedding(text_inputs)
+
+        x = self.prenet(x)
+        x = x.transpose(1, 2)
+        x = self.cbhg(x)
+
+        # since 2020/06/19 we feed prenet inputs into dur pred
+        # as described in https://github.com/as-ideas/ForwardTacotron/issues/11
         dur_hat = self.dur_pred(x)
         dur_hat = dur_hat.squeeze()
 
-        x = x.transpose(1, 2)
-        x = self.prenet(x)
         x = self.lr(x, durs)
         x, _ = self.lstm(x)
         x = F.dropout(x,
@@ -840,12 +996,13 @@ class ForwardTacotron(nn.Module):
         x = self.lin(x)
         x = x.transpose(1, 2)
 
-        x_post = self.postnet(x)
-        x_post = self.post_proj(x_post)
-        x_post = x_post.transpose(1, 2)
+        #x_post = self.postnet(x)
+        #x_post = self.post_proj(x_post)
+        #x_post = x_post.transpose(1, 2)
 
-        x_post = self.pad(x_post, mels.size(2))
+        #x_post = self.pad(x_post, mels.size(2))
         x = self.pad(x, mels.size(2))
+        x_post = x
         return (x, x_post, dur_hat)
 
     def inference(self, x, alpha=1.0):
@@ -855,14 +1012,18 @@ class ForwardTacotron(nn.Module):
         #x = torch.as_tensor(x, dtype=torch.long, device=device).unsqueeze(0)
 
         print(f"x init {x.shape}")
-        x = self.embedding(x) #.transpose(1,2)
-        print(f"x pre dur pred {x.shape}")
-        dur = self.dur_pred(x, alpha=alpha)
-        dur = dur.squeeze(2)
+        x = self.embedding(x)  # .transpose(1,2)
 
         print(f"x pre prenet {x.shape}")
-        x = x.transpose(1, 2)
         x = self.prenet(x)
+        x = x.transpose(1, 2)
+        x = self.cbhg(x)
+
+        print(f"x pre dur pred {x.shape}")
+        dur = self.dur_pred(x, alpha=alpha)
+        #dur = dur.squeeze(2)
+        #dur = dur.squeeze()
+
         print(f"x pre lr {x.shape}")
         x = self.lr(x, dur)
         print(f"x pre lstm {x.shape}")
@@ -875,9 +1036,10 @@ class ForwardTacotron(nn.Module):
         x = x.transpose(1, 2)
 
         print(f"x pre postnet {x.shape}")
-        x_post = self.postnet(x)
-        x_post = self.post_proj(x_post)
-        x_post = x_post.transpose(1, 2)
+        #x_post = self.postnet(x)
+        #x_post = self.post_proj(x_post)
+        #x_post = x_post.transpose(1, 2)
+        x_post = x
 
         print(f"x post {x_post.shape}")
         #x, x_post, dur = x.squeeze(), x_post.squeeze(), dur.squeeze()
@@ -913,7 +1075,7 @@ class ForwardTacotron(nn.Module):
 
     def parse_batch(self, batch):
         text_padded, input_lengths, mel_padded, gate_padded, \
-            output_lengths, ctc_text, ctc_text_lengths, ids, durs  = batch
+            output_lengths, ctc_text, ctc_text_lengths, ids, durs = batch
         text_padded = to_gpu(text_padded).long()
         input_lengths = to_gpu(input_lengths).long()
         durs_padded = to_gpu(durs).long()
@@ -928,7 +1090,6 @@ class ForwardTacotron(nn.Module):
             (text_padded, input_lengths, mel_padded, max_len, output_lengths,
              ctc_text, ctc_text_lengths, durs_padded),
             (mel_padded, gate_padded))
-
 
 
 class DurationTacotron2(nn.Module):
