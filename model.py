@@ -735,6 +735,7 @@ class Tacotron2(nn.Module):
         self.postnet = Postnet(hparams)
         self.drop_frame_rate = hparams.drop_frame_rate
         self.use_mmi = hparams.use_mmi
+        self.hparams = hparams
         if self.drop_frame_rate > 0.:
             # global mean is not used at inference.
             self.global_mean = getattr(hparams, 'global_mean', None)
@@ -786,6 +787,8 @@ class Tacotron2(nn.Module):
 
         if self.drop_frame_rate > 0. and self.training:
             # mels shape (B, n_mel_channels, T_out),
+            if self.global_mean is None:
+                self.global_mean = getattr(self.hparams, 'global_mean', None)
             mels = dropout_frame(mels, self.global_mean,
                                  output_lengths, self.drop_frame_rate)
 

@@ -180,7 +180,7 @@ def calculate_global_mean(data_loader, global_mean_npy):
     print('calculating global mean...')
     for i, batch in enumerate(data_loader):
         (text_padded, input_lengths, mel_padded, gate_padded,
-         output_lengths, ctc_text, ctc_text_lengths, ids) = batch
+         output_lengths, ctc_text, ctc_text_lengths, ids, durs) = batch
         # padded values are 0.
         sums.append(mel_padded.double().sum(dim=(0, 2)))
         frames.append(output_lengths.double().sum())
@@ -293,7 +293,7 @@ def train(experiment, output_directory, log_directory, checkpoint_path, warm_sta
     global_mean_path = os.path.join(experiment.paths["acoustic_features"], "global_mean.npy")
     train_loader, trainset, valset, collate_fn = prepare_dataloaders(experiment, hparams, model.requires_durations)
     if hparams.drop_frame_rate > 0.:
-        global_mean = calculate_global_mean(train_loader, hparams.global_mean_npy)
+        global_mean = calculate_global_mean(train_loader, global_mean_path)
         hparams.global_mean = global_mean
 
     learning_rate = hparams.learning_rate
@@ -350,7 +350,10 @@ def train(experiment, output_directory, log_directory, checkpoint_path, warm_sta
             model.zero_grad()
             x, y = model.parse_batch(batch)
             mel_lens = x[4]
-            dur =  x[7]
+            if model.requires_durations:
+                dur =  x[7]
+            else:
+                dur = None
             y_pred = model(x)
 
             loss, loginfo = criterion(y_pred, y, mel_lens, dur)
@@ -359,7 +362,7 @@ def train(experiment, output_directory, log_directory, checkpoint_path, warm_sta
                 decoder_outputs = y_pred[0].transpose(2, 1)
                 ctc_text, ctc_text_lengths, aco_lengths = x[-2], x[-1], x[4]
                 taco_loss = loss
-                mi_loss = model.mi(decoder_outputs, ctc_text, aco_lengths, ctc_text_lengths)
+                mi_loss = model.mi(decoder_outputs, ctc_text, aco_lengths, ctc_text_lengths, dur)
                 if hparams.use_gaf:
                     if i % gradient_adaptive_factor.UPDATE_GAF_EVERY_N_STEP == 0:
                         safe_loss = 0. * sum([x.sum() for x in model.parameters()])
