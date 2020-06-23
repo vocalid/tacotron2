@@ -4,10 +4,15 @@ from torch.utils.tensorboard import SummaryWriter
 from plotting_utils import plot_alignment_to_numpy, plot_spectrogram_to_numpy
 from plotting_utils import plot_gate_outputs_to_numpy
 
+import tacorn.log
+
+slack_logger = tacorn.log.get_slack_log()
+slack_log_interval = 1000
 
 class ForwardTacotronLogger(SummaryWriter):
     def __init__(self, logdir):
         super(ForwardTacotronLogger, self).__init__(logdir)
+        self.last_slack_log = 0
 
     def log_training(self, loginfo, total_loss, taco_loss, mi_loss, grad_norm,
                      gaf, learning_rate, duration, iteration):
@@ -23,8 +28,14 @@ class ForwardTacotronLogger(SummaryWriter):
             self.add_scalar("forwardtaco/learning.rate", learning_rate, iteration)
             self.add_scalar("forwardtaco/duration", duration, iteration)
 
-    def log_validation(self, reduced_loss, model, y, y_pred, iteration):
+            if iteration > self.last_slack_log + slack_log_interval:
+                self.last_slack_log = iteration
+                slack_logger(f"Iteration {iteration} | sec/it {duration} | loss {total_loss}")
+
+
+    def log_validation(self, reduced_loss, reduced_dur_loss, model, y, y_pred, iteration):
         self.add_scalar("forwardtaco/validation.loss", reduced_loss, iteration)
+        self.add_scalar("forwardtaco/validation.dur_loss", reduced_dur_loss, iteration)
         #_, _, mel_outputs, gate_outputs, alignments = y_pred
         m1, m2, dur_hat = y_pred
         mel_targets, gate_targets = y

@@ -993,9 +993,9 @@ class ForwardTacotron(nn.Module):
 
         x = self.lr(x, durs)
         x, _ = self.lstm(x)
-        x = F.dropout(x,
-                      p=self.dropout,
-                      training=self.training)
+        #x = F.dropout(x,
+        #              p=self.dropout,
+        #              training=self.training)
         x = self.lin(x)
         x = x.transpose(1, 2)
 
@@ -1031,9 +1031,9 @@ class ForwardTacotron(nn.Module):
         x = self.lr(x, dur)
         print(f"x pre lstm {x.shape}")
         x, _ = self.lstm(x)
-        x = F.dropout(x,
-                      p=self.dropout,
-                      training=self.training)
+        #x = F.dropout(x,
+        #              p=self.dropout,
+        #              training=self.training)
         print(f"x pre lin {x.shape}")
         x = self.lin(x)
         x = x.transpose(1, 2)
