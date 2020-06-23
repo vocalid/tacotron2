@@ -146,23 +146,29 @@ def validate(model, criterion, valset, iteration, batch_size, n_gpus,
                                 pin_memory=False, collate_fn=collate_fn)
 
         val_loss = 0.0
+        total_dur_loss = 0.0
         for i, batch in enumerate(val_loader):
             x, y = model.parse_batch(batch)
             mel_lens = x[4]
             dur =  x[7]
             y_pred = model(x)
             loss, loginfo = criterion(y_pred, y, mel_lens, dur)
+            m1_loss, m2_loss, dur_loss = loginfo
             if distributed_run:
                 reduced_val_loss = reduce_tensor(loss.data, n_gpus).item()
+                reduced_dur_loss = reduce_tensor(dur_loss, n_gpus)
             else:
                 reduced_val_loss = loss.item()
+                reduced_dur_loss = dur_loss
             val_loss += reduced_val_loss
+            total_dur_loss += reduced_dur_loss
         val_loss = val_loss / (i + 1)
+        total_dur_loss = total_dur_loss / (i + 1)
 
     model.train()
     if rank == 0:
         print("Validation loss {}: {:9f}  ".format(iteration, val_loss))
-        logger.log_validation(val_loss, model, y, y_pred, iteration)
+        logger.log_validation(val_loss, total_dur_loss, model, y, y_pred, iteration)
 
 
 def calculate_global_mean(data_loader, global_mean_npy):
