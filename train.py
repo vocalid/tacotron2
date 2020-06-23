@@ -149,7 +149,10 @@ def validate(model, criterion, valset, iteration, batch_size, n_gpus,
         for i, batch in enumerate(val_loader):
             x, y = model.parse_batch(batch)
             mel_lens = x[4]
-            dur =  x[7]
+            if model.requires_durations:
+                dur =  x[7]
+            else:
+                dur = None
             y_pred = model(x)
             loss, loginfo = criterion(y_pred, y, mel_lens, dur)
             if distributed_run:
